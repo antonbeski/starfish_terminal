@@ -1,10 +1,31 @@
 import traceback
-import requests
 from flask import Flask, request
 import yfinance as yf
 import plotly.graph_objects as go
 import plotly.offline as pyo
 import pandas as pd
+
+try:
+    from curl_cffi import requests as curl_requests
+    def get_yf_session():
+        """Use curl_cffi to impersonate Chrome at TLS level — bypasses Yahoo Finance bot detection."""
+        return curl_requests.Session(impersonate="chrome120")
+except ImportError:
+    import requests as _requests
+    def get_yf_session():
+        session = _requests.Session()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+        })
+        return session
 
 app = Flask(__name__)
 
@@ -19,27 +40,6 @@ PERIODS = [
     ("1y", "1 Year"), ("2y", "2 Years"), ("5y", "5 Years"),
 ]
 VALID_PERIODS = {p[0] for p in PERIODS}
-
-
-def get_yf_session():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;"
-            "q=0.9,image/avif,image/webp,*/*;q=0.8"
-        ),
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
-    })
-    return session
 
 
 def flatten_columns(df):
@@ -170,7 +170,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>StockChart</title>
+  <title>Starfish</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
@@ -481,7 +481,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
 <header>
   <div class="logo">
     <span class="logo-pip"></span>
-    StockChart
+    Starfish
   </div>
   <span class="subtitle">US &amp; NSE markets</span>
 </header>
