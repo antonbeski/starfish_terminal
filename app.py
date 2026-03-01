@@ -22,9 +22,6 @@ VALID_PERIODS = {p[0] for p in PERIODS}
 
 
 def get_yf_session():
-    """Return a requests.Session that mimics a real browser.
-    This is required on Vercel (and other serverless platforms) because
-    Yahoo Finance blocks plain Python requests without proper headers."""
     session = requests.Session()
     session.headers.update({
         "User-Agent": (
@@ -62,7 +59,7 @@ def build_chart(ticker, period, chart_type):
             progress=False,
             auto_adjust=True,
             actions=False,
-            session=session,      # <-- key fix: pass browser-like session
+            session=session,
         )
     except Exception as e:
         return None, f"Download failed: {e}"
@@ -82,7 +79,6 @@ def build_chart(ticker, period, chart_type):
     if data.empty:
         return None, "All rows were empty after cleaning."
 
-    # Fetch company name — use a fresh session here too
     try:
         t = yf.Ticker(ticker, session=session)
         name = t.fast_info.get("longName") or t.info.get("shortName") or ticker
@@ -99,8 +95,10 @@ def build_chart(ticker, period, chart_type):
             low=data["Low"],
             close=data["Close"],
             name=ticker,
-            increasing_line_color="#26a641",
-            decreasing_line_color="#f85149",
+            increasing_line_color="#ffffff",
+            decreasing_line_color="#555555",
+            increasing_fillcolor="rgba(255,255,255,0.15)",
+            decreasing_fillcolor="rgba(80,80,80,0.15)",
         )
     else:
         trace = go.Scatter(
@@ -108,26 +106,40 @@ def build_chart(ticker, period, chart_type):
             y=data["Close"],
             mode="lines",
             name=ticker,
-            line=dict(color="#58a6ff", width=2),
+            line=dict(color="#ffffff", width=2),
             fill="tozeroy",
-            fillcolor="rgba(88,166,255,0.08)",
+            fillcolor="rgba(255,255,255,0.04)",
         )
 
     fig = go.Figure(data=trace)
     fig.update_layout(
         title=dict(
             text=f"{name} ({ticker.upper()})",
-            font=dict(size=20, color="#e6edf3"),
+            font=dict(size=18, color="#ffffff", family="'DM Sans', sans-serif"),
         ),
         xaxis_title="Date",
         yaxis_title=f"Price ({currency})",
-        plot_bgcolor="#0d1117",
-        paper_bgcolor="#161b22",
-        font=dict(color="#e6edf3"),
-        xaxis=dict(gridcolor="#21262d", rangeslider=dict(visible=False)),
-        yaxis=dict(gridcolor="#21262d"),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#888888", family="'DM Sans', sans-serif"),
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.06)",
+            rangeslider=dict(visible=False),
+            color="#666666",
+            showline=False,
+        ),
+        yaxis=dict(
+            gridcolor="rgba(255,255,255,0.06)",
+            color="#666666",
+            showline=False,
+        ),
         hovermode="x unified",
         margin=dict(l=50, r=30, t=60, b=50),
+        hoverlabel=dict(
+            bgcolor="rgba(15,15,15,0.95)",
+            bordercolor="rgba(255,255,255,0.15)",
+            font=dict(color="#ffffff"),
+        ),
     )
     return pyo.plot(fig, output_type="div", include_plotlyjs=False), None
 
@@ -135,8 +147,8 @@ def build_chart(ticker, period, chart_type):
 def render_page(ticker, period, chart_type, graph_html, error):
     chips = ""
     for sym, _ in POPULAR_STOCKS:
-        active = 'class="chip active"' if sym == ticker else 'class="chip"'
-        chips += f'<span {active} onclick="setTicker(\'{sym}\')">{sym}</span>\n'
+        active = "chip active" if sym == ticker else "chip"
+        chips += f'<span class="{active}" onclick="setTicker(\'{sym}\')">{sym}</span>\n'
 
     period_opts = ""
     for val, label in PERIODS:
@@ -147,11 +159,11 @@ def render_page(ticker, period, chart_type, graph_html, error):
     ct_line   = "selected" if chart_type == "line" else ""
 
     if error:
-        content = f'<div class="error-box">⚠️ {error}</div>'
+        content = f'<div class="error-box">{error}</div>'
     elif graph_html:
         content = graph_html
     else:
-        content = ""
+        content = '<div class="empty-state">Enter a ticker symbol above to load a chart.</div>'
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -159,64 +171,355 @@ def render_page(ticker, period, chart_type, graph_html, error):
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>StockChart</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
   <style>
-    *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
-    body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#0d1117;color:#e6edf3;min-height:100vh}}
-    header{{background:#161b22;border-bottom:1px solid #30363d;padding:16px 24px}}
-    .logo{{font-size:1.4rem;font-weight:700;color:#58a6ff}}
-    .subtitle{{font-size:.85rem;color:#8b949e;margin-top:2px}}
-    main{{max-width:1200px;margin:0 auto;padding:28px 20px}}
-    .panel{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px 24px;margin-bottom:24px}}
-    .panel-title{{font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;margin-bottom:16px}}
-    form{{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:12px;align-items:end}}
-    @media(max-width:700px){{form{{grid-template-columns:1fr 1fr}}.btn{{grid-column:span 2}}}}
-    label{{display:block;font-size:.8rem;color:#8b949e;margin-bottom:6px;font-weight:500}}
-    input,select{{width:100%;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#e6edf3;padding:10px 14px;font-size:.95rem;outline:none;transition:border-color .2s}}
-    input:focus,select:focus{{border-color:#58a6ff;box-shadow:0 0 0 3px rgba(88,166,255,.15)}}
-    select option{{background:#161b22}}
-    .btn{{background:#238636;color:#fff;border:none;border-radius:8px;padding:10px 22px;font-size:.95rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .2s}}
-    .btn:hover{{background:#2ea043}}
-    .chips{{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}}
-    .chip{{background:#21262d;border:1px solid #30363d;border-radius:20px;padding:4px 14px;font-size:.8rem;cursor:pointer;color:#8b949e;transition:all .2s}}
-    .chip:hover,.chip.active{{background:#58a6ff;border-color:#58a6ff;color:#0d1117;font-weight:600}}
-    .chart-card{{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px 16px;overflow:hidden}}
-    .error-box{{background:#2d1b1b;border:1px solid #f85149;border-radius:8px;padding:16px 20px;color:#f85149}}
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+
+    :root {{
+      --bg:           #060606;
+      --surface:      rgba(255,255,255,0.04);
+      --surface-mid:  rgba(255,255,255,0.07);
+      --border:       rgba(255,255,255,0.09);
+      --border-soft:  rgba(255,255,255,0.05);
+      --text:         #f0f0f0;
+      --text-muted:   #666666;
+      --text-dim:     #3a3a3a;
+      --accent:       #ffffff;
+      --accent-mute:  rgba(255,255,255,0.1);
+      --blur:         blur(20px);
+      --radius:       16px;
+      --radius-sm:    9px;
+    }}
+
+    html {{ scroll-behavior: smooth; }}
+
+    body {{
+      font-family: 'DM Sans', sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }}
+
+    body::before {{
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 90% 55% at 15% 5%,  rgba(255,255,255,0.022) 0%, transparent 55%),
+        radial-gradient(ellipse 55% 45% at 85% 85%, rgba(255,255,255,0.012) 0%, transparent 50%);
+      pointer-events: none;
+      z-index: 0;
+    }}
+
+    /* ── Header ── */
+    header {{
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 28px;
+      background: rgba(6,6,6,0.75);
+      backdrop-filter: var(--blur);
+      -webkit-backdrop-filter: var(--blur);
+      border-bottom: 1px solid var(--border-soft);
+    }}
+
+    .logo {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }}
+
+    .logo-pip {{
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: blink 2.8s ease-in-out infinite;
+      flex-shrink: 0;
+    }}
+
+    @keyframes blink {{
+      0%,100% {{ opacity: 1; transform: scale(1); }}
+      50%      {{ opacity: 0.2; transform: scale(0.65); }}
+    }}
+
+    .subtitle {{
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      letter-spacing: 0.03em;
+    }}
+
+    /* ── Main ── */
+    main {{
+      position: relative;
+      z-index: 1;
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 30px 20px 64px;
+    }}
+
+    /* ── Glass ── */
+    .glass {{
+      background: var(--surface);
+      backdrop-filter: var(--blur);
+      -webkit-backdrop-filter: var(--blur);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }}
+
+    /* ── Panel ── */
+    .panel {{
+      padding: 26px 30px;
+      margin-bottom: 18px;
+    }}
+
+    .panel-label {{
+      font-size: 0.62rem;
+      font-weight: 600;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 20px;
+    }}
+
+    form {{
+      display: grid;
+      grid-template-columns: 1.5fr 1fr 1fr auto;
+      gap: 14px;
+      align-items: end;
+    }}
+
+    .field-group label {{
+      display: block;
+      font-size: 0.7rem;
+      font-weight: 500;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }}
+
+    input, select {{
+      width: 100%;
+      background: rgba(255,255,255,0.035);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text);
+      padding: 10px 14px;
+      font-size: 0.875rem;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+      appearance: none;
+      -webkit-appearance: none;
+    }}
+
+    input::placeholder {{ color: var(--text-dim); }}
+
+    input:focus, select:focus {{
+      border-color: rgba(255,255,255,0.28);
+      background: rgba(255,255,255,0.065);
+      box-shadow: 0 0 0 3px rgba(255,255,255,0.05);
+    }}
+
+    select {{
+      cursor: pointer;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23555' d='M5 6L0 0h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 13px center;
+      padding-right: 34px;
+    }}
+
+    select option {{
+      background: #111111;
+      color: #f0f0f0;
+    }}
+
+    .btn {{
+      background: var(--accent);
+      color: #000000;
+      border: none;
+      border-radius: var(--radius-sm);
+      padding: 10px 26px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      transition: opacity 0.18s, transform 0.13s;
+      height: 42px;
+    }}
+
+    .btn:hover  {{ opacity: 0.85; }}
+    .btn:active {{ transform: scale(0.96); }}
+
+    /* ── Chips ── */
+    .chips {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 22px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border-soft);
+    }}
+
+    .chip {{
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      padding: 5px 15px;
+      font-size: 0.72rem;
+      font-family: 'DM Mono', monospace;
+      cursor: pointer;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      transition: all 0.16s;
+      user-select: none;
+    }}
+
+    .chip:hover {{
+      border-color: rgba(255,255,255,0.3);
+      color: var(--text);
+      background: var(--accent-mute);
+    }}
+
+    .chip.active {{
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #000000;
+      font-weight: 600;
+    }}
+
+    /* ── Chart Card ── */
+    .chart-card {{
+      padding: 24px 20px 16px;
+      min-height: 460px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }}
+
+    .chart-card > div {{
+      width: 100%;
+    }}
+
+    /* ── Error ── */
+    .error-box {{
+      border: 1px solid rgba(255,255,255,0.1);
+      border-left: 3px solid rgba(255,255,255,0.45);
+      border-radius: var(--radius-sm);
+      padding: 16px 20px;
+      color: #999999;
+      font-size: 0.875rem;
+      background: rgba(255,255,255,0.025);
+      width: 100%;
+      line-height: 1.6;
+    }}
+
+    /* ── Empty state ── */
+    .empty-state {{
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      text-align: center;
+      letter-spacing: 0.03em;
+    }}
+
+    /* ── Responsive ── */
+    @media (max-width: 860px) {{
+      form {{
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }}
+      .field-group:first-child {{
+        grid-column: span 2;
+      }}
+      .btn {{
+        grid-column: span 2;
+        width: 100%;
+      }}
+    }}
+
+    @media (max-width: 600px) {{
+      header {{ padding: 0 16px; }}
+      .subtitle {{ display: none; }}
+      main {{ padding: 18px 14px 48px; }}
+      .panel {{ padding: 20px 18px; }}
+      .chart-card {{ padding: 16px 10px 10px; min-height: 300px; }}
+    }}
+
+    @media (max-width: 400px) {{
+      form {{
+        grid-template-columns: 1fr;
+      }}
+      .field-group:first-child {{
+        grid-column: span 1;
+      }}
+      .btn {{
+        grid-column: span 1;
+      }}
+    }}
   </style>
 </head>
 <body>
+
 <header>
-  <div class="logo">📈 StockChart</div>
-  <div class="subtitle">Live stock charts — US &amp; NSE markets</div>
+  <div class="logo">
+    <span class="logo-pip"></span>
+    StockChart
+  </div>
+  <span class="subtitle">US &amp; NSE markets</span>
 </header>
+
 <main>
-  <div class="panel">
-    <div class="panel-title">Search</div>
+  <div class="glass panel">
+    <div class="panel-label">Search</div>
     <form method="POST" action="/">
-      <div>
+      <div class="field-group">
         <label for="ticker">Ticker Symbol</label>
         <input id="ticker" name="ticker" type="text" value="{ticker}"
-               placeholder="e.g. AAPL, GOOGL, TCS.NS" required/>
+               placeholder="AAPL, GOOGL, TCS.NS" required
+               autocomplete="off" autocapitalize="characters" spellcheck="false"/>
       </div>
-      <div>
+      <div class="field-group">
         <label for="period">Time Range</label>
         <select id="period" name="period">{period_opts}</select>
       </div>
-      <div>
+      <div class="field-group">
         <label for="chart_type">Chart Type</label>
         <select id="chart_type" name="chart_type">
-          <option value="candlestick" {ct_candle}>🕯 Candlestick</option>
-          <option value="line" {ct_line}>📉 Line</option>
+          <option value="candlestick" {ct_candle}>Candlestick</option>
+          <option value="line" {ct_line}>Line</option>
         </select>
       </div>
-      <button type="submit" class="btn">Search →</button>
+      <button type="submit" class="btn">Search</button>
     </form>
     <div class="chips">{chips}</div>
   </div>
-  <div class="chart-card">{content}</div>
+
+  <div class="glass chart-card">{content}</div>
 </main>
+
 <script>
-  function setTicker(s){{document.getElementById('ticker').value=s;document.querySelector('form').submit()}}
+  function setTicker(s) {{
+    document.getElementById('ticker').value = s;
+    document.querySelector('form').submit();
+  }}
 </script>
 </body>
 </html>"""
@@ -239,20 +542,19 @@ def index():
 
 @app.route("/debug")
 def debug():
-    """Diagnostic endpoint — visit /debug on Vercel to see the exact error."""
     try:
         session = get_yf_session()
         data = yf.download("AAPL", period="5d", progress=False,
                            auto_adjust=True, session=session)
         return (
-            f"<pre style='background:#161b22;color:#58a6ff;padding:24px'>"
-            f"✅ yfinance OK\nShape: {data.shape}\n\n{data.tail().to_string()}</pre>"
+            f"<pre style='background:#111;color:#fff;padding:24px;font-family:monospace'>"
+            f"yfinance OK\nShape: {data.shape}\n\n{data.tail().to_string()}</pre>"
         )
     except Exception:
         tb = traceback.format_exc()
         return (
-            f"<pre style='background:#161b22;color:#f85149;padding:24px'>"
-            f"❌ yfinance FAILED\n\n{tb}</pre>"
+            f"<pre style='background:#111;color:#aaa;padding:24px;font-family:monospace'>"
+            f"yfinance FAILED\n\n{tb}</pre>"
         ), 500
 
 
@@ -260,8 +562,8 @@ def debug():
 def internal_error(e):
     tb = traceback.format_exc()
     return (
-        f"<pre style='background:#1a1a2e;color:#ff6b6b;padding:24px'>"
-        f"<b>500 — Internal Server Error</b>\n\n{tb}</pre>"
+        f"<pre style='background:#111;color:#aaa;padding:24px;font-family:monospace'>"
+        f"500 Internal Server Error\n\n{tb}</pre>"
     ), 500
 
 
