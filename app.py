@@ -1,4 +1,5 @@
 import traceback
+import requests
 from flask import Flask, request
 import yfinance as yf
 import plotly.graph_objects as go
@@ -20,6 +21,30 @@ PERIODS = [
 VALID_PERIODS = {p[0] for p in PERIODS}
 
 
+def get_yf_session():
+    """Return a requests.Session that mimics a real browser.
+    This is required on Vercel (and other serverless platforms) because
+    Yahoo Finance blocks plain Python requests without proper headers."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;"
+            "q=0.9,image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "max-age=0",
+    })
+    return session
+
+
 def flatten_columns(df):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -27,15 +52,26 @@ def flatten_columns(df):
 
 
 def build_chart(ticker, period, chart_type):
+    session = get_yf_session()
+
     try:
-        data = yf.download(ticker, period=period, interval="1d",
-                           progress=False, auto_adjust=True, actions=False)
+        data = yf.download(
+            ticker,
+            period=period,
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+            actions=False,
+            session=session,      # <-- key fix: pass browser-like session
+        )
     except Exception as e:
         return None, f"Download failed: {e}"
 
     if data is None or data.empty:
-        return None, (f"No data found for '{ticker}'. "
-                      "Check the symbol — use '.NS' for NSE stocks (e.g. TCS.NS).")
+        return None, (
+            f"No data found for '{ticker}'. "
+            "Check the symbol — use '.NS' for NSE stocks (e.g. TCS.NS)."
+        )
 
     data = flatten_columns(data)
     missing = {"Open", "High", "Low", "Close"} - set(data.columns)
@@ -46,8 +82,10 @@ def build_chart(ticker, period, chart_type):
     if data.empty:
         return None, "All rows were empty after cleaning."
 
+    # Fetch company name — use a fresh session here too
     try:
-        name = yf.Ticker(ticker).fast_info.company_name or ticker
+        t = yf.Ticker(ticker, session=session)
+        name = t.fast_info.get("longName") or t.info.get("shortName") or ticker
     except Exception:
         name = ticker
 
@@ -55,48 +93,59 @@ def build_chart(ticker, period, chart_type):
 
     if chart_type == "candlestick":
         trace = go.Candlestick(
-            x=data.index, open=data["Open"], high=data["High"],
-            low=data["Low"], close=data["Close"], name=ticker,
-            increasing_line_color="#26a641", decreasing_line_color="#f85149",
+            x=data.index,
+            open=data["Open"],
+            high=data["High"],
+            low=data["Low"],
+            close=data["Close"],
+            name=ticker,
+            increasing_line_color="#26a641",
+            decreasing_line_color="#f85149",
         )
     else:
         trace = go.Scatter(
-            x=data.index, y=data["Close"], mode="lines", name=ticker,
+            x=data.index,
+            y=data["Close"],
+            mode="lines",
+            name=ticker,
             line=dict(color="#58a6ff", width=2),
-            fill="tozeroy", fillcolor="rgba(88,166,255,0.08)",
+            fill="tozeroy",
+            fillcolor="rgba(88,166,255,0.08)",
         )
 
     fig = go.Figure(data=trace)
     fig.update_layout(
-        title=dict(text=f"{name} ({ticker.upper()})", font=dict(size=20, color="#e6edf3")),
-        xaxis_title="Date", yaxis_title=f"Price ({currency})",
-        plot_bgcolor="#0d1117", paper_bgcolor="#161b22",
+        title=dict(
+            text=f"{name} ({ticker.upper()})",
+            font=dict(size=20, color="#e6edf3"),
+        ),
+        xaxis_title="Date",
+        yaxis_title=f"Price ({currency})",
+        plot_bgcolor="#0d1117",
+        paper_bgcolor="#161b22",
         font=dict(color="#e6edf3"),
         xaxis=dict(gridcolor="#21262d", rangeslider=dict(visible=False)),
         yaxis=dict(gridcolor="#21262d"),
-        hovermode="x unified", margin=dict(l=50, r=30, t=60, b=50),
+        hovermode="x unified",
+        margin=dict(l=50, r=30, t=60, b=50),
     )
     return pyo.plot(fig, output_type="div", include_plotlyjs=False), None
 
 
 def render_page(ticker, period, chart_type, graph_html, error):
-    # Quick-ticker chips
     chips = ""
     for sym, _ in POPULAR_STOCKS:
         active = 'class="chip active"' if sym == ticker else 'class="chip"'
         chips += f'<span {active} onclick="setTicker(\'{sym}\')">{sym}</span>\n'
 
-    # Period options
     period_opts = ""
     for val, label in PERIODS:
         sel = "selected" if val == period else ""
         period_opts += f'<option value="{val}" {sel}>{label}</option>\n'
 
-    # Chart type options
     ct_candle = "selected" if chart_type == "candlestick" else ""
     ct_line   = "selected" if chart_type == "line" else ""
 
-    # Content area
     if error:
         content = f'<div class="error-box">⚠️ {error}</div>'
     elif graph_html:
@@ -188,11 +237,32 @@ def index():
     return render_page(ticker, period, chart_type, graph_html, error)
 
 
+@app.route("/debug")
+def debug():
+    """Diagnostic endpoint — visit /debug on Vercel to see the exact error."""
+    try:
+        session = get_yf_session()
+        data = yf.download("AAPL", period="5d", progress=False,
+                           auto_adjust=True, session=session)
+        return (
+            f"<pre style='background:#161b22;color:#58a6ff;padding:24px'>"
+            f"✅ yfinance OK\nShape: {data.shape}\n\n{data.tail().to_string()}</pre>"
+        )
+    except Exception:
+        tb = traceback.format_exc()
+        return (
+            f"<pre style='background:#161b22;color:#f85149;padding:24px'>"
+            f"❌ yfinance FAILED\n\n{tb}</pre>"
+        ), 500
+
+
 @app.errorhandler(500)
 def internal_error(e):
     tb = traceback.format_exc()
-    return (f"<pre style='background:#1a1a2e;color:#ff6b6b;padding:24px'>"
-            f"<b>500 — Internal Server Error</b>\n\n{tb}</pre>"), 500
+    return (
+        f"<pre style='background:#1a1a2e;color:#ff6b6b;padding:24px'>"
+        f"<b>500 — Internal Server Error</b>\n\n{tb}</pre>"
+    ), 500
 
 
 if __name__ == "__main__":
