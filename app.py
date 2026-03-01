@@ -1,30 +1,10 @@
 import traceback
+import requests
 from flask import Flask, request
 import yfinance as yf
 import plotly.graph_objects as go
 import plotly.offline as pyo
 import pandas as pd
-
-# curl_cffi impersonates Chrome at the TLS level — the only reliable fix for
-# Yahoo Finance bot-detection on serverless platforms like Vercel.
-try:
-    from curl_cffi import requests as curl_requests
-    def get_yf_session():
-        return curl_requests.Session(impersonate="chrome120")
-except ImportError:
-    import requests as _req
-    def get_yf_session():
-        s = _req.Session()
-        s.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.5",
-        })
-        return s
-
 
 app = Flask(__name__)
 
@@ -40,16 +20,81 @@ PERIODS = [
 ]
 VALID_PERIODS = {p[0] for p in PERIODS}
 
+# ── Yahoo Finance cookie + crumb setup ──────────────────────────────────────
+# Yahoo requires a valid session cookie and a "crumb" token before it will
+# serve any data. On Vercel, yfinance's auto-fetch for these fails silently.
+# We fetch them manually and inject them into yfinance's session.
 
-def flatten_columns(df):
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
+_YF_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://finance.yahoo.com/",
+    "Origin": "https://finance.yahoo.com",
+    "DNT": "1",
+    "Connection": "keep-alive",
+}
+
+_session_cache = {}   # simple in-process cache so we don't re-fetch every request
 
 
-def build_chart(ticker, period, chart_type):
-    session = get_yf_session()
+def get_yahoo_session():
+    """
+    Return a requests.Session with a valid Yahoo Finance cookie + crumb.
+    Tries multiple Yahoo endpoints in order until one succeeds.
+    """
+    if _session_cache.get("session"):
+        return _session_cache["session"], _session_cache.get("crumb")
 
+    session = requests.Session()
+    session.headers.update(_YF_HEADERS)
+
+    # Step 1: hit the consent / main page to get cookies
+    cookie_urls = [
+        "https://fc.yahoo.com",
+        "https://finance.yahoo.com/",
+        "https://login.yahoo.com/",
+    ]
+    for url in cookie_urls:
+        try:
+            session.get(url, timeout=10, allow_redirects=True)
+            break
+        except Exception:
+            continue
+
+    # Step 2: fetch the crumb
+    crumb = None
+    crumb_urls = [
+        "https://query1.finance.yahoo.com/v1/test/getcrumb",
+        "https://query2.finance.yahoo.com/v1/test/getcrumb",
+    ]
+    for url in crumb_urls:
+        try:
+            r = session.get(url, timeout=10)
+            if r.status_code == 200 and r.text and "<" not in r.text:
+                crumb = r.text.strip()
+                break
+        except Exception:
+            continue
+
+    _session_cache["session"] = session
+    _session_cache["crumb"] = crumb
+    return session, crumb
+
+
+def fetch_yfinance_data(ticker, period):
+    """
+    Download ticker data using a manually obtained Yahoo Finance session.
+    Falls back to direct yfinance download if the manual approach fails.
+    """
+    session, crumb = get_yahoo_session()
+
+    # Inject our session into yfinance
     try:
         data = yf.download(
             ticker,
@@ -60,8 +105,44 @@ def build_chart(ticker, period, chart_type):
             actions=False,
             session=session,
         )
+        if data is not None and not data.empty:
+            return data, None
     except Exception as e:
-        return None, f"Download failed: {e}"
+        pass
+
+    # Fallback: fresh session, no crumb
+    try:
+        _session_cache.clear()
+        fresh_session = requests.Session()
+        fresh_session.headers.update(_YF_HEADERS)
+        data = yf.download(
+            ticker,
+            period=period,
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+            actions=False,
+            session=fresh_session,
+        )
+        if data is not None and not data.empty:
+            return data, None
+    except Exception as e:
+        return None, str(e)
+
+    return None, None
+
+
+def flatten_columns(df):
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
+def build_chart(ticker, period, chart_type):
+    data, err = fetch_yfinance_data(ticker, period)
+
+    if err:
+        return None, f"Download failed: {err}"
 
     if data is None or data.empty:
         return None, (
@@ -79,6 +160,7 @@ def build_chart(ticker, period, chart_type):
         return None, "All rows were empty after cleaning."
 
     try:
+        session, _ = get_yahoo_session()
         t = yf.Ticker(ticker, session=session)
         name = t.fast_info.get("longName") or t.info.get("shortName") or ticker
     except Exception:
@@ -510,21 +592,25 @@ def index():
 
 @app.route("/debug")
 def debug():
+    out = []
     try:
-        session = get_yf_session()
+        session, crumb = get_yahoo_session()
+        out.append(f"Cookies: {dict(session.cookies)}")
+        out.append(f"Crumb:   {crumb!r}")
         data = yf.download("AAPL", period="5d", progress=False,
                            auto_adjust=True, session=session)
-        return (
-            f"<pre style='background:#111;color:#fff;padding:24px;font-family:monospace'>"
-            f"yfinance OK\nSession type: {type(session).__name__}\n"
-            f"Shape: {data.shape}\n\n{data.tail().to_string()}</pre>"
-        )
+        out.append(f"Shape:   {data.shape}")
+        out.append(data.tail().to_string())
+        color = "#7fff7f"
     except Exception:
-        tb = traceback.format_exc()
-        return (
-            f"<pre style='background:#111;color:#f55;padding:24px;font-family:monospace'>"
-            f"yfinance FAILED\n\n{tb}</pre>"
-        ), 500
+        out.append(traceback.format_exc())
+        color = "#ff7f7f"
+
+    body = "\n".join(out)
+    return (
+        f"<pre style='background:#111;color:{color};padding:24px;"
+        f"font-family:monospace;white-space:pre-wrap'>{body}</pre>"
+    )
 
 
 @app.errorhandler(500)
