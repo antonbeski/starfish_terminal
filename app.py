@@ -5,27 +5,26 @@ import plotly.graph_objects as go
 import plotly.offline as pyo
 import pandas as pd
 
+# curl_cffi impersonates Chrome at the TLS level — the only reliable fix for
+# Yahoo Finance bot-detection on serverless platforms like Vercel.
 try:
     from curl_cffi import requests as curl_requests
     def get_yf_session():
-        """Use curl_cffi to impersonate Chrome at TLS level — bypasses Yahoo Finance bot detection."""
         return curl_requests.Session(impersonate="chrome120")
 except ImportError:
-    import requests as _requests
+    import requests as _req
     def get_yf_session():
-        session = _requests.Session()
-        session.headers.update({
+        s = _req.Session()
+        s.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
         })
-        return session
+        return s
+
 
 app = Flask(__name__)
 
@@ -179,22 +178,19 @@ def render_page(ticker, period, chart_type, graph_html, error):
     *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
     :root {{
-      --bg:           #060606;
-      --surface:      rgba(255,255,255,0.04);
-      --surface-mid:  rgba(255,255,255,0.07);
-      --border:       rgba(255,255,255,0.09);
-      --border-soft:  rgba(255,255,255,0.05);
-      --text:         #f0f0f0;
-      --text-muted:   #666666;
-      --text-dim:     #3a3a3a;
-      --accent:       #ffffff;
-      --accent-mute:  rgba(255,255,255,0.1);
-      --blur:         blur(20px);
-      --radius:       16px;
-      --radius-sm:    9px;
+      --bg:          #060606;
+      --surface:     rgba(255,255,255,0.04);
+      --border:      rgba(255,255,255,0.09);
+      --border-soft: rgba(255,255,255,0.05);
+      --text:        #f0f0f0;
+      --text-muted:  #666666;
+      --text-dim:    #3a3a3a;
+      --accent:      #ffffff;
+      --accent-mute: rgba(255,255,255,0.1);
+      --blur:        blur(20px);
+      --radius:      16px;
+      --radius-sm:   9px;
     }}
-
-    html {{ scroll-behavior: smooth; }}
 
     body {{
       font-family: 'DM Sans', sans-serif;
@@ -216,7 +212,6 @@ def render_page(ticker, period, chart_type, graph_html, error):
       z-index: 0;
     }}
 
-    /* ── Header ── */
     header {{
       position: sticky;
       top: 0;
@@ -263,7 +258,6 @@ def render_page(ticker, period, chart_type, graph_html, error):
       letter-spacing: 0.03em;
     }}
 
-    /* ── Main ── */
     main {{
       position: relative;
       z-index: 1;
@@ -272,7 +266,6 @@ def render_page(ticker, period, chart_type, graph_html, error):
       padding: 30px 20px 64px;
     }}
 
-    /* ── Glass ── */
     .glass {{
       background: var(--surface);
       backdrop-filter: var(--blur);
@@ -281,7 +274,6 @@ def render_page(ticker, period, chart_type, graph_html, error):
       border-radius: var(--radius);
     }}
 
-    /* ── Panel ── */
     .panel {{
       padding: 26px 30px;
       margin-bottom: 18px;
@@ -343,10 +335,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
       padding-right: 34px;
     }}
 
-    select option {{
-      background: #111111;
-      color: #f0f0f0;
-    }}
+    select option {{ background: #111111; color: #f0f0f0; }}
 
     .btn {{
       background: var(--accent);
@@ -368,7 +357,6 @@ def render_page(ticker, period, chart_type, graph_html, error):
     .btn:hover  {{ opacity: 0.85; }}
     .btn:active {{ transform: scale(0.96); }}
 
-    /* ── Chips ── */
     .chips {{
       display: flex;
       flex-wrap: wrap;
@@ -405,7 +393,6 @@ def render_page(ticker, period, chart_type, graph_html, error):
       font-weight: 600;
     }}
 
-    /* ── Chart Card ── */
     .chart-card {{
       padding: 24px 20px 16px;
       min-height: 460px;
@@ -415,11 +402,8 @@ def render_page(ticker, period, chart_type, graph_html, error):
       overflow: hidden;
     }}
 
-    .chart-card > div {{
-      width: 100%;
-    }}
+    .chart-card > div {{ width: 100%; }}
 
-    /* ── Error ── */
     .error-box {{
       border: 1px solid rgba(255,255,255,0.1);
       border-left: 3px solid rgba(255,255,255,0.45);
@@ -432,7 +416,6 @@ def render_page(ticker, period, chart_type, graph_html, error):
       line-height: 1.6;
     }}
 
-    /* ── Empty state ── */
     .empty-state {{
       color: var(--text-dim);
       font-size: 0.85rem;
@@ -440,19 +423,10 @@ def render_page(ticker, period, chart_type, graph_html, error):
       letter-spacing: 0.03em;
     }}
 
-    /* ── Responsive ── */
     @media (max-width: 860px) {{
-      form {{
-        grid-template-columns: 1fr 1fr;
-        gap: 12px;
-      }}
-      .field-group:first-child {{
-        grid-column: span 2;
-      }}
-      .btn {{
-        grid-column: span 2;
-        width: 100%;
-      }}
+      form {{ grid-template-columns: 1fr 1fr; gap: 12px; }}
+      .field-group:first-child {{ grid-column: span 2; }}
+      .btn {{ grid-column: span 2; width: 100%; }}
     }}
 
     @media (max-width: 600px) {{
@@ -464,15 +438,9 @@ def render_page(ticker, period, chart_type, graph_html, error):
     }}
 
     @media (max-width: 400px) {{
-      form {{
-        grid-template-columns: 1fr;
-      }}
-      .field-group:first-child {{
-        grid-column: span 1;
-      }}
-      .btn {{
-        grid-column: span 1;
-      }}
+      form {{ grid-template-columns: 1fr; }}
+      .field-group:first-child {{ grid-column: span 1; }}
+      .btn {{ grid-column: span 1; }}
     }}
   </style>
 </head>
@@ -548,12 +516,13 @@ def debug():
                            auto_adjust=True, session=session)
         return (
             f"<pre style='background:#111;color:#fff;padding:24px;font-family:monospace'>"
-            f"yfinance OK\nShape: {data.shape}\n\n{data.tail().to_string()}</pre>"
+            f"yfinance OK\nSession type: {type(session).__name__}\n"
+            f"Shape: {data.shape}\n\n{data.tail().to_string()}</pre>"
         )
     except Exception:
         tb = traceback.format_exc()
         return (
-            f"<pre style='background:#111;color:#aaa;padding:24px;font-family:monospace'>"
+            f"<pre style='background:#111;color:#f55;padding:24px;font-family:monospace'>"
             f"yfinance FAILED\n\n{tb}</pre>"
         ), 500
 
