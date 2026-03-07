@@ -1,12 +1,56 @@
+import re
+import time
 import traceback
 import requests
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import yfinance as yf
 import plotly.graph_objects as go
 import plotly.offline as pyo
 import pandas as pd
 
 app = Flask(__name__)
+
+# ── Live news channel YouTube handles ───────────────────────────────────────
+NEWS_CHANNELS = [
+    {"id": "cnbctv18",   "handle": "CNBC-TV18",   "label": "CNBC-TV18",  "lang": "EN"},
+    {"id": "zeebusiness","handle": "ZeeBusiness", "label": "Zee Business","lang": "HI"},
+    {"id": "awaaz",      "handle": "CNBCAwaaz",   "label": "CNBC Awaaz", "lang": "HI"},
+    {"id": "ndtvprofit", "handle": "NDTVProfit",  "label": "NDTV Profit","lang": "EN"},
+]
+
+_news_cache = {}   # {handle: {"video_id": str, "ts": float}}
+_NEWS_TTL   = 3600  # re-fetch after 1 hour
+
+_YT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+def fetch_live_video_id(handle: str) -> str | None:
+    """Scrape the channel's /live page and extract the current live video ID."""
+    cached = _news_cache.get(handle)
+    if cached and time.time() - cached["ts"] < _NEWS_TTL:
+        return cached["video_id"]
+
+    url = f"https://www.youtube.com/@{handle}/live"
+    try:
+        r = requests.get(url, headers=_YT_HEADERS, timeout=10, allow_redirects=True)
+        # YouTube redirects /live to the actual watch URL when live
+        # The final URL contains the video ID
+        final_url = r.url  # e.g. https://www.youtube.com/watch?v=XXXXXXXXXXX
+        m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", final_url)
+        if not m:
+            # Also try scraping from page HTML
+            m = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', r.text)
+        video_id = m.group(1) if m else None
+        _news_cache[handle] = {"video_id": video_id, "ts": time.time()}
+        return video_id
+    except Exception:
+        return None
 
 POPULAR_STOCKS = [
     ("AAPL", "Apple"), ("GOOGL", "Google"), ("MSFT", "Microsoft"),
@@ -527,88 +571,70 @@ def render_page(ticker, period, chart_type, graph_html, error):
       50%      {{ opacity: 0.3; transform: scale(0.6); }}
     }}
 
-    .news-grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 14px;
-    }}
-
-    .news-card {{
+    .news-tabs {{
       display: flex;
-      flex-direction: column;
-      gap: 10px;
-      padding: 18px 20px;
-      background: rgba(255,255,255,0.03);
+      gap: 8px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }}
+
+    .news-tab {{
+      background: transparent;
       border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      text-decoration: none;
-      color: inherit;
-      transition: background 0.18s, border-color 0.18s, transform 0.13s;
+      border-radius: 100px;
+      padding: 6px 18px;
+      font-size: 0.72rem;
+      font-family: 'DM Mono', monospace;
       cursor: pointer;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      transition: all 0.16s;
+      user-select: none;
     }}
 
-    .news-card:hover {{
-      background: rgba(255,255,255,0.07);
-      border-color: rgba(255,255,255,0.22);
-      transform: translateY(-2px);
+    .news-tab:hover {{
+      border-color: rgba(255,255,255,0.3);
+      color: var(--text);
+      background: var(--accent-mute);
     }}
 
-    .news-card-top {{
+    .news-tab.active {{
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #000000;
+      font-weight: 600;
+    }}
+
+    .news-iframe-wrap {{
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%;
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      background: rgba(0,0,0,0.5);
+    }}
+
+    .news-loading {{
+      position: absolute;
+      inset: 0;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-    }}
-
-    .news-badge {{
-      font-size: 0.58rem;
-      font-weight: 700;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      padding: 3px 8px;
-      border-radius: 100px;
-      background: rgba(255,68,68,0.15);
-      color: #ff6b6b;
-      border: 1px solid rgba(255,68,68,0.25);
-    }}
-
-    .news-lang {{
-      font-size: 0.62rem;
-      color: var(--text-dim);
+      justify-content: center;
+      color: var(--text-muted);
+      font-size: 0.8rem;
       letter-spacing: 0.05em;
     }}
 
-    .news-name {{
-      font-size: 0.95rem;
-      font-weight: 600;
-      color: var(--text);
-      letter-spacing: -0.01em;
-    }}
-
-    .news-desc {{
-      font-size: 0.72rem;
-      color: var(--text-muted);
-      line-height: 1.5;
-    }}
-
-    .news-cta {{
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      font-size: 0.68rem;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--text-muted);
-      margin-top: 4px;
-      transition: color 0.15s;
-    }}
-
-    .news-card:hover .news-cta {{
-      color: var(--text);
+    .news-iframe-wrap iframe {{
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
     }}
 
     .news-notice {{
-      margin-top: 14px;
+      margin-top: 12px;
       font-size: 0.66rem;
       color: var(--text-dim);
       letter-spacing: 0.03em;
@@ -679,45 +705,20 @@ def render_page(ticker, period, chart_type, graph_html, error):
     <div class="panel-label">
       <span class="news-live-dot"></span>Live Financial News
     </div>
-    <div class="news-grid">
-      <a class="news-card" href="https://www.youtube.com/@CNBC-TV18/live" target="_blank" rel="noopener">
-        <div class="news-card-top">
-          <span class="news-badge">&#x25CF; Live</span>
-          <span class="news-lang">English</span>
-        </div>
-        <div class="news-name">CNBC-TV18</div>
-        <div class="news-desc">India's #1 business news — markets, stocks, economy &amp; corporate news.</div>
-        <span class="news-cta">Watch on YouTube &#x2192;</span>
-      </a>
-      <a class="news-card" href="https://www.youtube.com/@ZeeBusiness/live" target="_blank" rel="noopener">
-        <div class="news-card-top">
-          <span class="news-badge">&#x25CF; Live</span>
-          <span class="news-lang">Hindi</span>
-        </div>
-        <div class="news-name">Zee Business</div>
-        <div class="news-desc">Leading Hindi business channel — Sensex, Nifty, trading tips &amp; analysis.</div>
-        <span class="news-cta">Watch on YouTube &#x2192;</span>
-      </a>
-      <a class="news-card" href="https://www.youtube.com/@CNBCAwaaz/live" target="_blank" rel="noopener">
-        <div class="news-card-top">
-          <span class="news-badge">&#x25CF; Live</span>
-          <span class="news-lang">Hindi</span>
-        </div>
-        <div class="news-name">CNBC Awaaz</div>
-        <div class="news-desc">Personal finance, mutual funds &amp; retail investor-focused Hindi coverage.</div>
-        <span class="news-cta">Watch on YouTube &#x2192;</span>
-      </a>
-      <a class="news-card" href="https://www.youtube.com/@NDTVProfit/live" target="_blank" rel="noopener">
-        <div class="news-card-top">
-          <span class="news-badge">&#x25CF; Live</span>
-          <span class="news-lang">English</span>
-        </div>
-        <div class="news-name">NDTV Profit</div>
-        <div class="news-desc">Breaking business news, market commentary &amp; expert interviews.</div>
-        <span class="news-cta">Watch on YouTube &#x2192;</span>
-      </a>
+    <div class="news-tabs" id="news-tabs">
+      <button class="news-tab active" data-handle="CNBC-TV18">CNBC-TV18</button>
+      <button class="news-tab" data-handle="ZeeBusiness">Zee Business</button>
+      <button class="news-tab" data-handle="CNBCAwaaz">CNBC Awaaz</button>
+      <button class="news-tab" data-handle="NDTVProfit">NDTV Profit</button>
     </div>
-    <p class="news-notice">&#x25CB; Streams are active during market hours (9:15 AM – 3:30 PM IST). Clicking a card opens the channel's live stream on YouTube.</p>
+    <div class="news-iframe-wrap">
+      <div id="news-loading" class="news-loading">Loading live stream&#8230;</div>
+      <iframe id="news-iframe"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+        allowfullscreen style="display:none">
+      </iframe>
+    </div>
+    <p class="news-notice">&#x25CF; Active during market hours (9:15 AM – 3:30 PM IST). If a channel is off-air the video will show as unavailable.</p>
   </div>
 </main>
 
@@ -727,7 +728,41 @@ def render_page(ticker, period, chart_type, graph_html, error):
     document.querySelector('form').submit();
   }}
 
+  // ── Live news player ──
+  const iframe   = document.getElementById('news-iframe');
+  const loading  = document.getElementById('news-loading');
 
+  function loadChannel(handle) {{
+    iframe.style.display = 'none';
+    loading.style.display = 'flex';
+    loading.textContent = 'Loading live stream\u2026';
+
+    fetch('/api/live-id?handle=' + encodeURIComponent(handle))
+      .then(r => r.json())
+      .then(data => {{
+        if (data.video_id) {{
+          iframe.src = 'https://www.youtube.com/embed/' + data.video_id + '?autoplay=1&rel=0';
+          iframe.style.display = 'block';
+          loading.style.display = 'none';
+        }} else {{
+          loading.textContent = 'Stream unavailable right now. Try another channel.';
+        }}
+      }})
+      .catch(() => {{
+        loading.textContent = 'Could not load stream. Check your connection.';
+      }});
+  }}
+
+  document.getElementById('news-tabs').addEventListener('click', function(e) {{
+    const btn = e.target.closest('.news-tab');
+    if (!btn) return;
+    document.querySelectorAll('.news-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    loadChannel(btn.dataset.handle);
+  }});
+
+  // Auto-load first channel on page load
+  loadChannel('CNBC-TV18');
 </script>
 </body>
 </html>"""
@@ -746,6 +781,18 @@ def index():
 
     graph_html, error = build_chart(ticker, period, chart_type)
     return render_page(ticker, period, chart_type, graph_html, error)
+
+
+@app.route("/api/live-id")
+def api_live_id():
+    """Return the current YouTube live video ID for a given channel handle."""
+    handle = request.args.get("handle", "")
+    if not handle:
+        return jsonify({"error": "missing handle"}), 400
+    video_id = fetch_live_video_id(handle)
+    if video_id:
+        return jsonify({"video_id": video_id})
+    return jsonify({"error": "not found"}), 404
 
 
 @app.route("/debug")
