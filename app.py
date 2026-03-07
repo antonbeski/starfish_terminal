@@ -13,7 +13,6 @@ app = Flask(__name__)
 # ── Live news channel YouTube handles ───────────────────────────────────────
 NEWS_CHANNELS = [
     {"id": "cnbctv18",  "handle": "cnbctv18",  "label": "CNBC TV18",        "lang": "EN", "region": "India",  "video_id": "1_Ih0JYmkjI"},
-    {"id": "awaaz",     "handle": "CNBCAwaaz", "label": "CNBC Awaaz",       "lang": "HI", "region": "India",  "video_id": "q907U1PM6To"},
     {"id": "bloomberg", "handle": "Bloomberg", "label": "Bloomberg Global",  "lang": "EN", "region": "Global", "video_id": "iEpJwprxDdk"},
     {"id": "yahoofi",   "handle": "yahoofi",   "label": "Yahoo Finance",    "lang": "EN", "region": "Global", "video_id": "KQp-e_XQnDE"},
 ]
