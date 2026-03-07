@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>StockChart — Live Stock Charts</title>
+  <title>STARFISH</title>
   <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -166,8 +166,8 @@
 
 <header>
   <div>
-    <div class="logo">📈 StockChart</div>
-    <div class="subtitle">Live stock charts — US &amp; NSE markets</div>
+    <div class="logo">StockChart</div>
+    <div class="subtitle">Live stock markets</div>
   </div>
 </header>
 
@@ -202,8 +202,8 @@
       <div>
         <label for="chart_type">Chart Type</label>
         <select id="chart_type" name="chart_type">
-          <option value="candlestick" {% if chart_type == 'candlestick' %}selected{% endif %}>🕯 Candlestick</option>
-          <option value="line" {% if chart_type == 'line' %}selected{% endif %}>📉 Line</option>
+          <option value="candlestick" {% if chart_type == 'candlestick' %}selected{% endif %}> Candlestick</option>
+          <option value="line" {% if chart_type == 'line' %}selected{% endif %}> Line</option>
         </select>
       </div>
 
