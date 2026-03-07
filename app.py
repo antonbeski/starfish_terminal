@@ -12,16 +12,11 @@ app = Flask(__name__)
 
 # ── Live news channel YouTube handles ───────────────────────────────────────
 NEWS_CHANNELS = [
-    {"id": "awaaz",      "handle": "CNBCAwaaz",        "label": "CNBC Awaaz",   "lang": "HI", "region": "India"},
-    {"id": "zeebusiness","handle": "ZeeBusiness",      "label": "Zee Business", "lang": "HI", "region": "India"},
-    {"id": "ndtvprofit", "handle": "NDTVProfitIndia",  "label": "NDTV Profit",  "lang": "EN", "region": "India"},
-    {"id": "etnow",      "handle": "ETNow",            "label": "ET Now",       "lang": "EN", "region": "India"},
-    {"id": "bloomberg",  "handle": "Bloomberg",        "label": "Bloomberg TV", "lang": "EN", "region": "Global"},
-    {"id": "aljazeera",  "handle": "aljazeeraenglish", "label": "Al Jazeera",   "lang": "EN", "region": "Global"},
+    {"id": "cnbctv18",  "handle": "cnbctv18",  "label": "CNBC TV18",        "lang": "EN", "region": "India",  "video_id": "1_Ih0JYmkjI"},
+    {"id": "awaaz",     "handle": "CNBCAwaaz", "label": "CNBC Awaaz",       "lang": "HI", "region": "India",  "video_id": "q907U1PM6To"},
+    {"id": "bloomberg", "handle": "Bloomberg", "label": "Bloomberg Global",  "lang": "EN", "region": "Global", "video_id": "iEpJwprxDdk"},
+    {"id": "yahoofi",   "handle": "yahoofi",   "label": "Yahoo Finance",    "lang": "EN", "region": "Global", "video_id": "KQp-e_XQnDE"},
 ]
-
-_news_cache = {}   # {handle: {"video_id": str, "is_live": bool, "ts": float}}
-_NEWS_TTL   = 600  # re-check every 10 minutes so live → offline transitions are caught
 
 _YT_HEADERS = {
     "User-Agent": (
@@ -37,40 +32,29 @@ _YT_HEADERS = {
 
 def fetch_live_video_id(handle: str) -> tuple[str | None, bool]:
     """
-    Try to get the current live video ID for a YouTube channel handle.
-    Returns (video_id, is_live).
-
-    Strategy:
-      1. Hit /@{handle}/live  — if YouTube redirects to /watch?v=ID the channel
-         is genuinely live. Confirm with isLive/isLiveBroadcast in the page body.
-      2. If not live (or step 1 fails), scrape /@{handle}/videos for the most
-         recent upload and return it with is_live=False.
-      3. Cache the result for _NEWS_TTL seconds.
+    For channels with a hardcoded video_id, return it directly as a live stream.
+    Falls back to scraping for any channel without a hardcoded ID.
     """
-    cached = _news_cache.get(handle)
-    if cached and time.time() - cached["ts"] < _NEWS_TTL:
-        return cached["video_id"], cached.get("is_live", False)
+    # Check for hardcoded video_id first
+    for ch in NEWS_CHANNELS:
+        if ch["handle"] == handle and ch.get("video_id"):
+            return ch["video_id"], True
 
+    # Fallback scraping (kept for any future non-hardcoded channels)
     def _get(url: str):
         return requests.get(url, headers=_YT_HEADERS, timeout=12, allow_redirects=True)
 
     video_id: str | None = None
     is_live = False
 
-    # ── Step 1: check /live page ─────────────────────────────────────────────
     try:
         r = _get(f"https://www.youtube.com/@{handle}/live")
         text = r.text
-
-        # YouTube redirects to /watch?v=ID when channel is truly live
         m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", r.url)
         if not m:
-            # Fallback: parse videoId from page source
             m = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', text)
-
         if m:
             candidate = m.group(1)
-            # Confirm it is an active broadcast
             actually_live = (
                 '"isLive":true' in text
                 or '"isLiveBroadcast"' in text
@@ -82,28 +66,22 @@ def fetch_live_video_id(handle: str) -> tuple[str | None, bool]:
     except Exception:
         pass
 
-    # ── Step 2: fallback — grab the latest uploaded video ────────────────────
-    # Run this if we are NOT live (so we always have something to play).
     if not is_live:
         try:
             r2 = _get(f"https://www.youtube.com/@{handle}/videos")
             ids = re.findall(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', r2.text)
-
-            # Deduplicate while preserving order
             seen: set[str] = set()
             unique: list[str] = []
             for vid in ids:
                 if vid not in seen:
                     seen.add(vid)
                     unique.append(vid)
-
             if unique:
-                video_id = unique[0]   # first de-duped ID = most recent upload
+                video_id = unique[0]
                 is_live  = False
         except Exception:
             pass
 
-    _news_cache[handle] = {"video_id": video_id, "is_live": is_live, "ts": time.time()}
     return video_id, is_live
 
 
