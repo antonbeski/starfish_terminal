@@ -589,8 +589,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
     <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <span id="news-status-badge" class="news-status-badge" style="display:none"></span>
       <p class="news-notice">
-        Plays the live broadcast if the channel is on air &mdash;
-        otherwise the latest uploaded video loads automatically.
+        
       </p>
     </div>
   </div>
