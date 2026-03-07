@@ -12,10 +12,10 @@ app = Flask(__name__)
 
 # ── Live news channel YouTube handles ───────────────────────────────────────
 NEWS_CHANNELS = [
-    {"id": "cnbctv18",   "handle": "CNBC-TV18",   "label": "CNBC-TV18",  "lang": "EN"},
-    {"id": "zeebusiness","handle": "ZeeBusiness", "label": "Zee Business","lang": "HI"},
-    {"id": "awaaz",      "handle": "CNBCAwaaz",   "label": "CNBC Awaaz", "lang": "HI"},
-    {"id": "ndtvprofit", "handle": "NDTVProfit",  "label": "NDTV Profit","lang": "EN"},
+    {"id": "awaaz",      "handle": "CNBCAwaaz",        "label": "CNBC Awaaz",   "lang": "HI", "region": "India"},
+    {"id": "zeebusiness","handle": "ZeeBusiness",      "label": "Zee Business", "lang": "HI", "region": "India"},
+    {"id": "bloomberg",  "handle": "Bloomberg",        "label": "Bloomberg TV", "lang": "EN", "region": "Global"},
+    {"id": "aljazeera",  "handle": "aljazeeraenglish", "label": "Al Jazeera",   "lang": "EN", "region": "Global"},
 ]
 
 _news_cache = {}   # {handle: {"video_id": str, "ts": float}}
@@ -640,6 +640,24 @@ def render_page(ticker, period, chart_type, graph_html, error):
       letter-spacing: 0.03em;
     }}
 
+    .news-tag {{
+      font-size: 0.55rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.08);
+      color: var(--text-dim);
+      margin-left: 4px;
+      vertical-align: middle;
+    }}
+
+    .news-tab.active .news-tag {{
+      background: rgba(0,0,0,0.15);
+      color: rgba(0,0,0,0.5);
+    }}
+
     @media (max-width: 860px) {{
       form {{ grid-template-columns: 1fr 1fr; gap: 12px; }}
       .field-group:first-child {{ grid-column: span 2; }}
@@ -706,10 +724,10 @@ def render_page(ticker, period, chart_type, graph_html, error):
       <span class="news-live-dot"></span>Live Financial News
     </div>
     <div class="news-tabs" id="news-tabs">
-      <button class="news-tab active" data-handle="CNBC-TV18">CNBC-TV18</button>
-      <button class="news-tab" data-handle="ZeeBusiness">Zee Business</button>
-      <button class="news-tab" data-handle="CNBCAwaaz">CNBC Awaaz</button>
-      <button class="news-tab" data-handle="NDTVProfit">NDTV Profit</button>
+      <button class="news-tab active" data-handle="CNBCAwaaz">CNBC Awaaz <span class="news-tag">India</span></button>
+      <button class="news-tab" data-handle="ZeeBusiness">Zee Business <span class="news-tag">India</span></button>
+      <button class="news-tab" data-handle="Bloomberg">Bloomberg TV <span class="news-tag">Global</span></button>
+      <button class="news-tab" data-handle="aljazeeraenglish">Al Jazeera <span class="news-tag">Global</span></button>
     </div>
     <div class="news-iframe-wrap">
       <div id="news-loading" class="news-loading">Loading live stream&#8230;</div>
@@ -762,7 +780,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
   }});
 
   // Auto-load first channel on page load
-  loadChannel('CNBC-TV18');
+  loadChannel('CNBCAwaaz');
 </script>
 </body>
 </html>"""
