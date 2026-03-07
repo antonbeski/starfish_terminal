@@ -283,7 +283,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>Starfish</title>
+  <title>STARFISH</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet"/>
@@ -537,7 +537,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
 
 <header>
   <div class="logo"><span class="logo-pip"></span>Starfish</div>
-  <span class="subtitle">US &amp; NSE markets</span>
+  <span class="subtitle">LIVE STOCK MARKETS</span>
 </header>
 
 <main>
