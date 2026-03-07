@@ -14,6 +14,8 @@ app = Flask(__name__)
 NEWS_CHANNELS = [
     {"id": "awaaz",      "handle": "CNBCAwaaz",        "label": "CNBC Awaaz",   "lang": "HI", "region": "India"},
     {"id": "zeebusiness","handle": "ZeeBusiness",      "label": "Zee Business", "lang": "HI", "region": "India"},
+    {"id": "ndtvprofit", "handle": "NDTVProfitIndia",  "label": "NDTV Profit",  "lang": "EN", "region": "India"},
+    {"id": "etnow",      "handle": "ETNow",            "label": "ET Now",       "lang": "EN", "region": "India"},
     {"id": "bloomberg",  "handle": "Bloomberg",        "label": "Bloomberg TV", "lang": "EN", "region": "Global"},
     {"id": "aljazeera",  "handle": "aljazeeraenglish", "label": "Al Jazeera",   "lang": "EN", "region": "Global"},
 ]
@@ -28,56 +30,82 @@ _YT_HEADERS = {
         "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.youtube.com/",
 }
 
-def fetch_live_video_id(handle: str) -> str | None:
-    """Scrape the channel's /live page and extract the current live video ID."""
+
+def fetch_live_video_id(handle: str) -> tuple[str | None, bool]:
+    """
+    Try to get the current live video ID for a YouTube channel handle.
+    Returns (video_id, is_live).
+
+    Strategy:
+      1. Hit /@{handle}/live  — if YouTube redirects to /watch?v=ID the channel
+         is genuinely live. Confirm with isLive/isLiveBroadcast in the page body.
+      2. If not live (or step 1 fails), scrape /@{handle}/videos for the most
+         recent upload and return it with is_live=False.
+      3. Cache the result for _NEWS_TTL seconds.
+    """
     cached = _news_cache.get(handle)
     if cached and time.time() - cached["ts"] < _NEWS_TTL:
         return cached["video_id"], cached.get("is_live", False)
 
-    def _get(url):
-        return requests.get(url, headers=_YT_HEADERS, timeout=10, allow_redirects=True)
+    def _get(url: str):
+        return requests.get(url, headers=_YT_HEADERS, timeout=12, allow_redirects=True)
 
-    video_id = None
-    is_live  = False
+    video_id: str | None = None
+    is_live = False
 
-    # ── Step 1: try the /live page ──────────────────────────────────────────
+    # ── Step 1: check /live page ─────────────────────────────────────────────
     try:
         r = _get(f"https://www.youtube.com/@{handle}/live")
-        # If truly live, YouTube redirects to /watch?v=ID
+        text = r.text
+
+        # YouTube redirects to /watch?v=ID when channel is truly live
         m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", r.url)
         if not m:
-            m = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', r.text)
+            # Fallback: parse videoId from page source
+            m = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', text)
+
         if m:
-            video_id = m.group(1)
-            # Confirm it is actually a live broadcast (not a redirect to a VOD)
-            is_live = '"isLive":true' in r.text or '"isLiveBroadcast"' in r.text
+            candidate = m.group(1)
+            # Confirm it is an active broadcast
+            actually_live = (
+                '"isLive":true' in text
+                or '"isLiveBroadcast"' in text
+                or '"liveBroadcastContent":"live"' in text
+            )
+            if actually_live:
+                video_id = candidate
+                is_live  = True
     except Exception:
         pass
 
-    # ── Step 2: fallback — grab the latest uploaded video ───────────────────
-    if not video_id or not is_live:
+    # ── Step 2: fallback — grab the latest uploaded video ────────────────────
+    # Run this if we are NOT live (so we always have something to play).
+    if not is_live:
         try:
             r2 = _get(f"https://www.youtube.com/@{handle}/videos")
-            # YouTube embeds video IDs in the page as {"videoId":"..."}
             ids = re.findall(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', r2.text)
+
             # Deduplicate while preserving order
-            seen = set()
-            unique = []
+            seen: set[str] = set()
+            unique: list[str] = []
             for vid in ids:
                 if vid not in seen:
                     seen.add(vid)
                     unique.append(vid)
+
             if unique:
-                # First entry after dedup is usually the most recent upload
-                video_id = unique[0]
+                video_id = unique[0]   # first de-duped ID = most recent upload
                 is_live  = False
         except Exception:
             pass
 
     _news_cache[handle] = {"video_id": video_id, "is_live": is_live, "ts": time.time()}
     return video_id, is_live
+
 
 POPULAR_STOCKS = [
     ("AAPL", "Apple"), ("GOOGL", "Google"), ("MSFT", "Microsoft"),
@@ -92,10 +120,6 @@ PERIODS = [
 VALID_PERIODS = {p[0] for p in PERIODS}
 
 # ── Yahoo Finance cookie + crumb setup ──────────────────────────────────────
-# Yahoo requires a valid session cookie and a "crumb" token before it will
-# serve any data. On Vercel, yfinance's auto-fetch for these fails silently.
-# We fetch them manually and inject them into yfinance's session.
-
 _YF_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -111,40 +135,28 @@ _YF_HEADERS = {
     "Connection": "keep-alive",
 }
 
-_session_cache = {}   # simple in-process cache so we don't re-fetch every request
+_session_cache = {}
 
 
 def get_yahoo_session():
-    """
-    Return a requests.Session with a valid Yahoo Finance cookie + crumb.
-    Tries multiple Yahoo endpoints in order until one succeeds.
-    """
     if _session_cache.get("session"):
         return _session_cache["session"], _session_cache.get("crumb")
 
     session = requests.Session()
     session.headers.update(_YF_HEADERS)
 
-    # Step 1: hit the consent / main page to get cookies
-    cookie_urls = [
-        "https://fc.yahoo.com",
-        "https://finance.yahoo.com/",
-        "https://login.yahoo.com/",
-    ]
-    for url in cookie_urls:
+    for url in ["https://fc.yahoo.com", "https://finance.yahoo.com/", "https://login.yahoo.com/"]:
         try:
             session.get(url, timeout=10, allow_redirects=True)
             break
         except Exception:
             continue
 
-    # Step 2: fetch the crumb
     crumb = None
-    crumb_urls = [
+    for url in [
         "https://query1.finance.yahoo.com/v1/test/getcrumb",
         "https://query2.finance.yahoo.com/v1/test/getcrumb",
-    ]
-    for url in crumb_urls:
+    ]:
         try:
             r = session.get(url, timeout=10)
             if r.status_code == 200 and r.text and "<" not in r.text:
@@ -154,46 +166,29 @@ def get_yahoo_session():
             continue
 
     _session_cache["session"] = session
-    _session_cache["crumb"] = crumb
+    _session_cache["crumb"]   = crumb
     return session, crumb
 
 
 def fetch_yfinance_data(ticker, period):
-    """
-    Download ticker data using a manually obtained Yahoo Finance session.
-    Falls back to direct yfinance download if the manual approach fails.
-    """
-    session, crumb = get_yahoo_session()
-
-    # Inject our session into yfinance
+    session, _ = get_yahoo_session()
     try:
         data = yf.download(
-            ticker,
-            period=period,
-            interval="1d",
-            progress=False,
-            auto_adjust=True,
-            actions=False,
-            session=session,
+            ticker, period=period, interval="1d",
+            progress=False, auto_adjust=True, actions=False, session=session,
         )
         if data is not None and not data.empty:
             return data, None
-    except Exception as e:
+    except Exception:
         pass
 
-    # Fallback: fresh session, no crumb
     try:
         _session_cache.clear()
-        fresh_session = requests.Session()
-        fresh_session.headers.update(_YF_HEADERS)
+        fresh = requests.Session()
+        fresh.headers.update(_YF_HEADERS)
         data = yf.download(
-            ticker,
-            period=period,
-            interval="1d",
-            progress=False,
-            auto_adjust=True,
-            actions=False,
-            session=fresh_session,
+            ticker, period=period, interval="1d",
+            progress=False, auto_adjust=True, actions=False, session=fresh,
         )
         if data is not None and not data.empty:
             return data, None
@@ -211,10 +206,8 @@ def flatten_columns(df):
 
 def build_chart(ticker, period, chart_type):
     data, err = fetch_yfinance_data(ticker, period)
-
     if err:
         return None, f"Download failed: {err}"
-
     if data is None or data.empty:
         return None, (
             f"No data found for '{ticker}'. "
@@ -241,57 +234,33 @@ def build_chart(ticker, period, chart_type):
 
     if chart_type == "candlestick":
         trace = go.Candlestick(
-            x=data.index,
-            open=data["Open"],
-            high=data["High"],
-            low=data["Low"],
-            close=data["Close"],
-            name=ticker,
-            increasing_line_color="#ffffff",
-            decreasing_line_color="#555555",
+            x=data.index, open=data["Open"], high=data["High"],
+            low=data["Low"], close=data["Close"], name=ticker,
+            increasing_line_color="#ffffff", decreasing_line_color="#555555",
             increasing_fillcolor="rgba(255,255,255,0.15)",
             decreasing_fillcolor="rgba(80,80,80,0.15)",
         )
     else:
         trace = go.Scatter(
-            x=data.index,
-            y=data["Close"],
-            mode="lines",
-            name=ticker,
+            x=data.index, y=data["Close"], mode="lines", name=ticker,
             line=dict(color="#ffffff", width=2),
-            fill="tozeroy",
-            fillcolor="rgba(255,255,255,0.04)",
+            fill="tozeroy", fillcolor="rgba(255,255,255,0.04)",
         )
 
     fig = go.Figure(data=trace)
     fig.update_layout(
-        title=dict(
-            text=f"{name} ({ticker.upper()})",
-            font=dict(size=18, color="#ffffff", family="'DM Sans', sans-serif"),
-        ),
-        xaxis_title="Date",
-        yaxis_title=f"Price ({currency})",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
+        title=dict(text=f"{name} ({ticker.upper()})",
+                   font=dict(size=18, color="#ffffff", family="'DM Sans', sans-serif")),
+        xaxis_title="Date", yaxis_title=f"Price ({currency})",
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#888888", family="'DM Sans', sans-serif"),
-        xaxis=dict(
-            gridcolor="rgba(255,255,255,0.06)",
-            rangeslider=dict(visible=False),
-            color="#666666",
-            showline=False,
-        ),
-        yaxis=dict(
-            gridcolor="rgba(255,255,255,0.06)",
-            color="#666666",
-            showline=False,
-        ),
-        hovermode="x unified",
-        margin=dict(l=50, r=30, t=60, b=50),
-        hoverlabel=dict(
-            bgcolor="rgba(15,15,15,0.95)",
-            bordercolor="rgba(255,255,255,0.15)",
-            font=dict(color="#ffffff"),
-        ),
+        xaxis=dict(gridcolor="rgba(255,255,255,0.06)", rangeslider=dict(visible=False),
+                   color="#666666", showline=False),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.06)", color="#666666", showline=False),
+        hovermode="x unified", margin=dict(l=50, r=30, t=60, b=50),
+        hoverlabel=dict(bgcolor="rgba(15,15,15,0.95)",
+                        bordercolor="rgba(255,255,255,0.15)",
+                        font=dict(color="#ffffff")),
     )
     return pyo.plot(fig, output_type="div", include_plotlyjs=False), None
 
@@ -316,6 +285,21 @@ def render_page(ticker, period, chart_type, graph_html, error):
         content = graph_html
     else:
         content = '<div class="empty-state">Enter a ticker symbol above to load a chart.</div>'
+
+    # Build news tabs from NEWS_CHANNELS
+    tabs_html = ""
+    for i, ch in enumerate(NEWS_CHANNELS):
+        active = "news-tab active" if i == 0 else "news-tab"
+        region_tag = f'<span class="news-tag">{ch["region"]}</span>'
+        lang_tag   = f'<span class="news-tag">{ch["lang"]}</span>'
+        tabs_html += (
+            f'<button class="{active}" '
+            f'data-handle="{ch["handle"]}">'
+            f'{ch["label"]} {region_tag}{lang_tag}'
+            f'</button>\n'
+        )
+
+    first_handle = NEWS_CHANNELS[0]["handle"]
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -366,349 +350,192 @@ def render_page(ticker, period, chart_type, graph_html, error):
     }}
 
     header {{
-      position: sticky;
-      top: 0;
-      z-index: 100;
-      height: 58px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 28px;
+      position: sticky; top: 0; z-index: 100;
+      height: 58px; display: flex; align-items: center;
+      justify-content: space-between; padding: 0 28px;
       background: rgba(6,6,6,0.75);
-      backdrop-filter: var(--blur);
-      -webkit-backdrop-filter: var(--blur);
+      backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
       border-bottom: 1px solid var(--border-soft);
     }}
 
     .logo {{
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      font-size: 0.9rem;
-      font-weight: 600;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--accent);
+      display: flex; align-items: center; gap: 10px;
+      font-size: 0.9rem; font-weight: 600;
+      letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent);
     }}
-
     .logo-pip {{
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--accent);
-      animation: blink 2.8s ease-in-out infinite;
-      flex-shrink: 0;
+      width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+      animation: blink 2.8s ease-in-out infinite; flex-shrink: 0;
     }}
-
     @keyframes blink {{
       0%,100% {{ opacity: 1; transform: scale(1); }}
       50%      {{ opacity: 0.2; transform: scale(0.65); }}
     }}
-
-    .subtitle {{
-      font-size: 0.72rem;
-      color: var(--text-dim);
-      letter-spacing: 0.03em;
-    }}
+    .subtitle {{ font-size: 0.72rem; color: var(--text-dim); letter-spacing: 0.03em; }}
 
     main {{
-      position: relative;
-      z-index: 1;
-      max-width: 1160px;
-      margin: 0 auto;
-      padding: 30px 20px 64px;
+      position: relative; z-index: 1;
+      max-width: 1160px; margin: 0 auto; padding: 30px 20px 64px;
     }}
 
     .glass {{
       background: var(--surface);
-      backdrop-filter: var(--blur);
-      -webkit-backdrop-filter: var(--blur);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
+      backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+      border: 1px solid var(--border); border-radius: var(--radius);
     }}
 
-    .panel {{
-      padding: 26px 30px;
-      margin-bottom: 18px;
-    }}
-
+    .panel {{ padding: 26px 30px; margin-bottom: 18px; }}
     .panel-label {{
-      font-size: 0.62rem;
-      font-weight: 600;
-      letter-spacing: 0.16em;
-      text-transform: uppercase;
-      color: var(--text-dim);
-      margin-bottom: 20px;
+      font-size: 0.62rem; font-weight: 600; letter-spacing: 0.16em;
+      text-transform: uppercase; color: var(--text-dim); margin-bottom: 20px;
     }}
 
     form {{
-      display: grid;
-      grid-template-columns: 1.5fr 1fr 1fr auto;
-      gap: 14px;
-      align-items: end;
+      display: grid; grid-template-columns: 1.5fr 1fr 1fr auto;
+      gap: 14px; align-items: end;
     }}
-
     .field-group label {{
-      display: block;
-      font-size: 0.7rem;
-      font-weight: 500;
-      letter-spacing: 0.05em;
-      color: var(--text-muted);
-      margin-bottom: 8px;
+      display: block; font-size: 0.7rem; font-weight: 500;
+      letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 8px;
     }}
-
     input, select {{
-      width: 100%;
-      background: rgba(255,255,255,0.035);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      color: var(--text);
-      padding: 10px 14px;
-      font-size: 0.875rem;
-      font-family: inherit;
-      outline: none;
+      width: 100%; background: rgba(255,255,255,0.035);
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      color: var(--text); padding: 10px 14px; font-size: 0.875rem;
+      font-family: inherit; outline: none;
       transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
-      appearance: none;
-      -webkit-appearance: none;
+      appearance: none; -webkit-appearance: none;
     }}
-
     input::placeholder {{ color: var(--text-dim); }}
-
     input:focus, select:focus {{
       border-color: rgba(255,255,255,0.28);
       background: rgba(255,255,255,0.065);
       box-shadow: 0 0 0 3px rgba(255,255,255,0.05);
     }}
-
     select {{
       cursor: pointer;
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23555' d='M5 6L0 0z'/%3E%3C/svg%3E");
-      background-repeat: no-repeat;
-      background-position: right 13px center;
-      padding-right: 34px;
+      background-repeat: no-repeat; background-position: right 13px center; padding-right: 34px;
     }}
-
     select option {{ background: #111111; color: #f0f0f0; }}
 
     .btn {{
-      background: var(--accent);
-      color: #000000;
-      border: none;
-      border-radius: var(--radius-sm);
-      padding: 10px 26px;
-      font-size: 0.8rem;
-      font-weight: 600;
-      font-family: inherit;
-      cursor: pointer;
-      white-space: nowrap;
-      letter-spacing: 0.09em;
-      text-transform: uppercase;
-      transition: opacity 0.18s, transform 0.13s;
-      height: 42px;
+      background: var(--accent); color: #000000; border: none;
+      border-radius: var(--radius-sm); padding: 10px 26px;
+      font-size: 0.8rem; font-weight: 600; font-family: inherit;
+      cursor: pointer; white-space: nowrap; letter-spacing: 0.09em;
+      text-transform: uppercase; transition: opacity 0.18s, transform 0.13s; height: 42px;
     }}
-
     .btn:hover  {{ opacity: 0.85; }}
     .btn:active {{ transform: scale(0.96); }}
 
     .chips {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 7px;
-      margin-top: 22px;
-      padding-top: 20px;
-      border-top: 1px solid var(--border-soft);
+      display: flex; flex-wrap: wrap; gap: 7px;
+      margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--border-soft);
     }}
-
     .chip {{
-      background: transparent;
-      border: 1px solid var(--border);
-      border-radius: 100px;
-      padding: 5px 15px;
-      font-size: 0.72rem;
-      font-family: 'DM Mono', monospace;
-      cursor: pointer;
-      color: var(--text-muted);
-      letter-spacing: 0.05em;
-      transition: all 0.16s;
-      user-select: none;
+      background: transparent; border: 1px solid var(--border);
+      border-radius: 100px; padding: 5px 15px;
+      font-size: 0.72rem; font-family: 'DM Mono', monospace;
+      cursor: pointer; color: var(--text-muted); letter-spacing: 0.05em;
+      transition: all 0.16s; user-select: none;
     }}
-
-    .chip:hover {{
-      border-color: rgba(255,255,255,0.3);
-      color: var(--text);
-      background: var(--accent-mute);
-    }}
-
-    .chip.active {{
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #000000;
-      font-weight: 600;
-    }}
+    .chip:hover {{ border-color: rgba(255,255,255,0.3); color: var(--text); background: var(--accent-mute); }}
+    .chip.active {{ background: var(--accent); border-color: var(--accent); color: #000000; font-weight: 600; }}
 
     .chart-card {{
-      padding: 24px 20px 16px;
-      min-height: 460px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
+      padding: 24px 20px 16px; min-height: 460px;
+      display: flex; align-items: center; justify-content: center; overflow: hidden;
     }}
-
     .chart-card > div {{ width: 100%; }}
 
     .error-box {{
       border: 1px solid rgba(255,255,255,0.1);
       border-left: 3px solid rgba(255,255,255,0.45);
-      border-radius: var(--radius-sm);
-      padding: 16px 20px;
-      color: #999999;
-      font-size: 0.875rem;
-      background: rgba(255,255,255,0.025);
-      width: 100%;
-      line-height: 1.6;
+      border-radius: var(--radius-sm); padding: 16px 20px;
+      color: #999999; font-size: 0.875rem;
+      background: rgba(255,255,255,0.025); width: 100%; line-height: 1.6;
     }}
-
-    .empty-state {{
-      color: var(--text-dim);
-      font-size: 0.85rem;
-      text-align: center;
-      letter-spacing: 0.03em;
-    }}
+    .empty-state {{ color: var(--text-dim); font-size: 0.85rem; text-align: center; letter-spacing: 0.03em; }}
 
     /* ── Live News Panel ── */
-    .news-panel {{
-      padding: 26px 30px;
-      margin-top: 18px;
-    }}
+    .news-panel {{ padding: 26px 30px; margin-top: 18px; }}
 
     .news-live-dot {{
-      display: inline-block;
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: #ff4444;
-      margin-right: 6px;
-      animation: livepulse 1.4s ease-in-out infinite;
-      vertical-align: middle;
+      display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+      background: #ff4444; margin-right: 6px;
+      animation: livepulse 1.4s ease-in-out infinite; vertical-align: middle;
     }}
-
     @keyframes livepulse {{
       0%,100% {{ opacity: 1; transform: scale(1); }}
       50%      {{ opacity: 0.3; transform: scale(0.6); }}
     }}
 
     .news-tabs {{
-      display: flex;
-      gap: 8px;
-      margin-bottom: 20px;
-      flex-wrap: wrap;
+      display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap;
     }}
-
     .news-tab {{
-      background: transparent;
-      border: 1px solid var(--border);
-      border-radius: 100px;
-      padding: 6px 18px;
-      font-size: 0.72rem;
-      font-family: 'DM Mono', monospace;
-      cursor: pointer;
-      color: var(--text-muted);
-      letter-spacing: 0.05em;
-      transition: all 0.16s;
-      user-select: none;
+      background: transparent; border: 1px solid var(--border);
+      border-radius: 100px; padding: 6px 18px;
+      font-size: 0.72rem; font-family: 'DM Mono', monospace;
+      cursor: pointer; color: var(--text-muted); letter-spacing: 0.05em;
+      transition: all 0.16s; user-select: none;
     }}
-
-    .news-tab:hover {{
-      border-color: rgba(255,255,255,0.3);
-      color: var(--text);
-      background: var(--accent-mute);
-    }}
-
-    .news-tab.active {{
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #000000;
-      font-weight: 600;
-    }}
+    .news-tab:hover {{ border-color: rgba(255,255,255,0.3); color: var(--text); background: var(--accent-mute); }}
+    .news-tab.active {{ background: var(--accent); border-color: var(--accent); color: #000000; font-weight: 600; }}
 
     .news-iframe-wrap {{
-      position: relative;
-      width: 100%;
-      padding-top: 56.25%;
-      border-radius: var(--radius-sm);
-      overflow: hidden;
-      background: rgba(0,0,0,0.5);
+      position: relative; width: 100%; padding-top: 56.25%;
+      border-radius: var(--radius-sm); overflow: hidden; background: rgba(0,0,0,0.5);
     }}
-
     .news-loading {{
-      position: absolute;
-      inset: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--text-muted);
-      font-size: 0.8rem;
-      letter-spacing: 0.05em;
+      position: absolute; inset: 0; display: flex;
+      align-items: center; justify-content: center;
+      color: var(--text-muted); font-size: 0.8rem; letter-spacing: 0.05em;
+      flex-direction: column; gap: 12px;
     }}
+    .news-spinner {{
+      width: 22px; height: 22px; border-radius: 50%;
+      border: 2px solid rgba(255,255,255,0.1);
+      border-top-color: rgba(255,255,255,0.5);
+      animation: spin 0.8s linear infinite;
+    }}
+    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
 
     .news-iframe-wrap iframe {{
-      position: absolute;
-      inset: 0;
-      width: 100%;
-      height: 100%;
-      border: none;
+      position: absolute; inset: 0; width: 100%; height: 100%; border: none;
     }}
-
     .news-notice {{
-      margin-top: 0;
-      font-size: 0.66rem;
-      color: var(--text-dim);
-      letter-spacing: 0.03em;
-      line-height: 1.5;
+      font-size: 0.66rem; color: var(--text-dim); letter-spacing: 0.03em; line-height: 1.5;
     }}
 
     .news-status-badge {{
-      display: inline-flex;
-      align-items: center;
-      font-size: 0.62rem;
-      font-weight: 700;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      padding: 3px 10px;
-      border-radius: 100px;
-      white-space: nowrap;
-      flex-shrink: 0;
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 0.62rem; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; padding: 3px 10px;
+      border-radius: 100px; white-space: nowrap; flex-shrink: 0;
     }}
-
     .news-status-badge.live {{
-      background: rgba(255,60,60,0.15);
-      border: 1px solid rgba(255,60,60,0.35);
-      color: #ff6b6b;
+      background: rgba(255,60,60,0.15); border: 1px solid rgba(255,60,60,0.35); color: #ff6b6b;
     }}
-
+    .news-status-badge.live::before {{
+      content: ''; display: inline-block; width: 5px; height: 5px; border-radius: 50%;
+      background: #ff4444; animation: livepulse 1.4s ease-in-out infinite;
+    }}
     .news-status-badge.latest {{
-      background: rgba(255,255,255,0.06);
-      border: 1px solid var(--border);
-      color: var(--text-muted);
+      background: rgba(255,255,255,0.06); border: 1px solid var(--border); color: var(--text-muted);
+    }}
+    .news-status-badge.error {{
+      background: rgba(255,160,0,0.1); border: 1px solid rgba(255,160,0,0.25); color: #ffaa44;
     }}
 
     .news-tag {{
-      font-size: 0.55rem;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      padding: 1px 5px;
-      border-radius: 4px;
-      background: rgba(255,255,255,0.08);
-      color: var(--text-dim);
-      margin-left: 4px;
-      vertical-align: middle;
+      font-size: 0.55rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;
+      padding: 1px 5px; border-radius: 4px;
+      background: rgba(255,255,255,0.08); color: var(--text-dim); margin-left: 4px; vertical-align: middle;
     }}
-
     .news-tab.active .news-tag {{
-      background: rgba(0,0,0,0.15);
-      color: rgba(0,0,0,0.5);
+      background: rgba(0,0,0,0.15); color: rgba(0,0,0,0.5);
     }}
 
     @media (max-width: 860px) {{
@@ -716,16 +543,12 @@ def render_page(ticker, period, chart_type, graph_html, error):
       .field-group:first-child {{ grid-column: span 2; }}
       .btn {{ grid-column: span 2; width: 100%; }}
     }}
-
     @media (max-width: 600px) {{
-      header {{ padding: 0 16px; }}
-      .subtitle {{ display: none; }}
-      main {{ padding: 18px 14px 48px; }}
-      .panel {{ padding: 20px 18px; }}
+      header {{ padding: 0 16px; }} .subtitle {{ display: none; }}
+      main {{ padding: 18px 14px 48px; }} .panel {{ padding: 20px 18px; }}
       .chart-card {{ padding: 16px 10px 10px; min-height: 300px; }}
       .news-panel {{ padding: 20px 18px; }}
     }}
-
     @media (max-width: 400px) {{
       form {{ grid-template-columns: 1fr; }}
       .field-group:first-child {{ grid-column: span 1; }}
@@ -736,10 +559,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
 <body>
 
 <header>
-  <div class="logo">
-    <span class="logo-pip"></span>
-    Starfish
-  </div>
+  <div class="logo"><span class="logo-pip"></span>Starfish</div>
   <span class="subtitle">US &amp; NSE markets</span>
 </header>
 
@@ -777,76 +597,119 @@ def render_page(ticker, period, chart_type, graph_html, error):
       <span class="news-live-dot"></span>Live Financial News
     </div>
     <div class="news-tabs" id="news-tabs">
-      <button class="news-tab active" data-handle="CNBCAwaaz">CNBC Awaaz <span class="news-tag">India</span></button>
-      <button class="news-tab" data-handle="ZeeBusiness">Zee Business <span class="news-tag">India</span></button>
-      <button class="news-tab" data-handle="Bloomberg">Bloomberg TV <span class="news-tag">Global</span></button>
-      <button class="news-tab" data-handle="aljazeeraenglish">Al Jazeera <span class="news-tag">Global</span></button>
+      {tabs_html}
     </div>
     <div class="news-iframe-wrap">
-      <div id="news-loading" class="news-loading">Loading live stream&#8230;</div>
+      <div id="news-loading" class="news-loading">
+        <div class="news-spinner"></div>
+        <span>Loading stream&hellip;</span>
+      </div>
       <iframe id="news-iframe"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen style="display:none">
       </iframe>
     </div>
-    <div style="margin-top:10px; display:flex; align-items:center; gap:10px;">
+    <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <span id="news-status-badge" class="news-status-badge" style="display:none"></span>
-      <p class="news-notice">Live stream plays if channel is on air &mdash; otherwise the latest uploaded video plays automatically.</p>
+      <p class="news-notice">
+        Plays the live broadcast if the channel is on air &mdash;
+        otherwise the latest uploaded video loads automatically.
+      </p>
     </div>
   </div>
 </main>
 
 <script>
+  // ── Ticker chips ──
   function setTicker(s) {{
     document.getElementById('ticker').value = s;
     document.querySelector('form').submit();
   }}
 
-  // ── Live news player ──
-  const iframe   = document.getElementById('news-iframe');
-  const loading  = document.getElementById('news-loading');
-  const badge    = document.getElementById('news-status-badge');
+  // ── Live news player ──────────────────────────────────────────────────────
+  const iframe  = document.getElementById('news-iframe');
+  const loading = document.getElementById('news-loading');
+  const badge   = document.getElementById('news-status-badge');
+
+  // In-flight request tracking (cancel stale loads when user switches fast)
+  let currentHandle = null;
+
+  function setLoading(msg) {{
+    iframe.style.display = 'none';
+    loading.innerHTML =
+      '<div class="news-spinner"></div><span>' + msg + '</span>';
+    loading.style.display = 'flex';
+    badge.style.display = 'none';
+  }}
+
+  function setError(msg) {{
+    iframe.style.display = 'none';
+    loading.innerHTML = '<span>' + msg + '</span>';
+    loading.style.display = 'flex';
+    badge.className = 'news-status-badge error';
+    badge.textContent = '\u26a0 Unavailable';
+    badge.style.display = 'inline-flex';
+  }}
 
   function loadChannel(handle) {{
-    iframe.style.display = 'none';
-    loading.style.display = 'flex';
-    loading.textContent = 'Loading\u2026';
-    badge.style.display = 'none';
+    if (currentHandle === handle) return;   // already loading / loaded
+    currentHandle = handle;
+    setLoading('Loading stream\u2026');
+
+    // Stop current playback immediately to avoid audio overlap
+    iframe.src = 'about:blank';
 
     fetch('/api/live-id?handle=' + encodeURIComponent(handle))
-      .then(r => r.json())
-      .then(data => {{
-        if (data.video_id) {{
-          iframe.src = 'https://www.youtube.com/embed/' + data.video_id + '?autoplay=1&rel=0';
-          iframe.style.display = 'block';
-          loading.style.display = 'none';
-          badge.style.display = 'inline-flex';
-          if (data.is_live) {{
-            badge.textContent = '\u25cf\u00a0LIVE';
-            badge.className = 'news-status-badge live';
-          }} else {{
-            badge.textContent = '\u25b6\u00a0Latest Video';
-            badge.className = 'news-status-badge latest';
-          }}
+      .then(function(r) {{
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      }})
+      .then(function(data) {{
+        // Guard: user may have already switched to another channel
+        if (handle !== currentHandle) return;
+
+        if (data.error || !data.video_id) {{
+          setError('Stream unavailable right now.');
+          return;
+        }}
+
+        // Build embed URL
+        var src = 'https://www.youtube.com/embed/' + data.video_id +
+                  '?autoplay=1&rel=0&modestbranding=1';
+
+        iframe.src = src;
+        iframe.style.display = 'block';
+        loading.style.display = 'none';
+
+        badge.style.display = 'inline-flex';
+        if (data.is_live) {{
+          badge.className = 'news-status-badge live';
+          badge.textContent = 'LIVE';
         }} else {{
-          loading.textContent = 'Stream unavailable right now.';
+          badge.className = 'news-status-badge latest';
+          badge.textContent = '\u25b6 Latest Video';
         }}
       }})
-      .catch(() => {{
-        loading.textContent = 'Could not load stream. Check your connection.';
+      .catch(function() {{
+        if (handle !== currentHandle) return;
+        setError('Could not load stream. Check your connection.');
       }});
   }}
 
+  // Tab click handler
   document.getElementById('news-tabs').addEventListener('click', function(e) {{
-    const btn = e.target.closest('.news-tab');
+    var btn = e.target.closest('.news-tab');
     if (!btn) return;
-    document.querySelectorAll('.news-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.news-tab').forEach(function(t) {{
+      t.classList.remove('active');
+    }});
     btn.classList.add('active');
+    currentHandle = null;   // reset guard so same handle can reload
     loadChannel(btn.dataset.handle);
   }});
 
   // Auto-load first channel on page load
-  loadChannel('CNBCAwaaz');
+  loadChannel('{first_handle}');
 </script>
 </body>
 </html>"""
@@ -869,10 +732,15 @@ def index():
 
 @app.route("/api/live-id")
 def api_live_id():
-    """Return the current YouTube live video ID (or latest video) for a given channel handle."""
-    handle = request.args.get("handle", "")
+    """
+    Return the current YouTube live video ID (or latest video) for a given channel handle.
+    Response: {"video_id": "...", "is_live": true/false}
+              {"error": "..."}  on failure
+    """
+    handle = request.args.get("handle", "").strip()
     if not handle:
         return jsonify({"error": "missing handle"}), 400
+
     video_id, is_live = fetch_live_video_id(handle)
     if video_id:
         return jsonify({"video_id": video_id, "is_live": is_live})
