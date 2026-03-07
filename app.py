@@ -411,7 +411,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
 
     select {{
       cursor: pointer;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23555' d='M5 6L0 0h10z'/%3E%3C/svg%3E");
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23555' d='M5 6L0 0z'/%3E%3C/svg%3E");
       background-repeat: no-repeat;
       background-position: right 13px center;
       padding-right: 34px;
@@ -505,6 +505,82 @@ def render_page(ticker, period, chart_type, graph_html, error):
       letter-spacing: 0.03em;
     }}
 
+    /* ── Live News Panel ── */
+    .news-panel {{
+      padding: 26px 30px;
+      margin-top: 18px;
+    }}
+
+    .news-tabs {{
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+    }}
+
+    .news-tab {{
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      padding: 6px 18px;
+      font-size: 0.72rem;
+      font-family: 'DM Mono', monospace;
+      cursor: pointer;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      transition: all 0.16s;
+      user-select: none;
+    }}
+
+    .news-tab:hover {{
+      border-color: rgba(255,255,255,0.3);
+      color: var(--text);
+      background: var(--accent-mute);
+    }}
+
+    .news-tab.active {{
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #000000;
+      font-weight: 600;
+    }}
+
+    .news-live-dot {{
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #ff4444;
+      margin-right: 6px;
+      animation: blink 1.4s ease-in-out infinite;
+      vertical-align: middle;
+    }}
+
+    .news-iframe-wrap {{
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%; /* 16:9 */
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      background: rgba(0,0,0,0.4);
+    }}
+
+    .news-iframe-wrap iframe {{
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+      border-radius: var(--radius-sm);
+    }}
+
+    .news-notice {{
+      margin-top: 12px;
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      letter-spacing: 0.03em;
+    }}
+
     @media (max-width: 860px) {{
       form {{ grid-template-columns: 1fr 1fr; gap: 12px; }}
       .field-group:first-child {{ grid-column: span 2; }}
@@ -517,6 +593,7 @@ def render_page(ticker, period, chart_type, graph_html, error):
       main {{ padding: 18px 14px 48px; }}
       .panel {{ padding: 20px 18px; }}
       .chart-card {{ padding: 16px 10px 10px; min-height: 300px; }}
+      .news-panel {{ padding: 20px 18px; }}
     }}
 
     @media (max-width: 400px) {{
@@ -563,12 +640,40 @@ def render_page(ticker, period, chart_type, graph_html, error):
   </div>
 
   <div class="glass chart-card">{content}</div>
+
+  <!-- ── Live News Panel ── -->
+  <div class="glass news-panel">
+    <div class="panel-label">
+      <span class="news-live-dot"></span>Live Financial News
+    </div>
+    <div class="news-tabs">
+      <button class="news-tab active" onclick="switchNews(this, 'https://www.youtube.com/embed/live_stream?channel=UCHqOqFsJVmCcAQSlBEAX-oQ&autoplay=1')">CNBC-TV18</button>
+      <button class="news-tab" onclick="switchNews(this, 'https://www.youtube.com/embed/live_stream?channel=UCJiVGE3JMQjBRRNlBTCFN0w&autoplay=1')">Zee Business</button>
+      <button class="news-tab" onclick="switchNews(this, 'https://www.youtube.com/embed/live_stream?channel=UCt4t-jeY85JegMlZ-E5UWtA&autoplay=1')">CNBC Awaaz</button>
+      <button class="news-tab" onclick="switchNews(this, 'https://www.youtube.com/embed/live_stream?channel=UCZFMm1mMw0F81Z37aaEzTUA&autoplay=1')">NDTV Profit</button>
+    </div>
+    <div class="news-iframe-wrap">
+      <iframe
+        id="news-iframe"
+        src="https://www.youtube.com/embed/live_stream?channel=UCHqOqFsJVmCcAQSlBEAX-oQ&autoplay=1"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+        allowfullscreen>
+      </iframe>
+    </div>
+    <p class="news-notice">Live streams are active during market hours (9:15 AM – 3:30 PM IST). If a stream shows as unavailable, the channel may be off-air.</p>
+  </div>
 </main>
 
 <script>
   function setTicker(s) {{
     document.getElementById('ticker').value = s;
     document.querySelector('form').submit();
+  }}
+
+  function switchNews(btn, url) {{
+    document.querySelectorAll('.news-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('news-iframe').src = url;
   }}
 </script>
 </body>
