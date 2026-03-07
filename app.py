@@ -18,8 +18,8 @@ NEWS_CHANNELS = [
     {"id": "aljazeera",  "handle": "aljazeeraenglish", "label": "Al Jazeera",   "lang": "EN", "region": "Global"},
 ]
 
-_news_cache = {}   # {handle: {"video_id": str, "ts": float}}
-_NEWS_TTL   = 3600  # re-fetch after 1 hour
+_news_cache = {}   # {handle: {"video_id": str, "is_live": bool, "ts": float}}
+_NEWS_TTL   = 600  # re-check every 10 minutes so live → offline transitions are caught
 
 _YT_HEADERS = {
     "User-Agent": (
@@ -34,23 +34,50 @@ def fetch_live_video_id(handle: str) -> str | None:
     """Scrape the channel's /live page and extract the current live video ID."""
     cached = _news_cache.get(handle)
     if cached and time.time() - cached["ts"] < _NEWS_TTL:
-        return cached["video_id"]
+        return cached["video_id"], cached.get("is_live", False)
 
-    url = f"https://www.youtube.com/@{handle}/live"
+    def _get(url):
+        return requests.get(url, headers=_YT_HEADERS, timeout=10, allow_redirects=True)
+
+    video_id = None
+    is_live  = False
+
+    # ── Step 1: try the /live page ──────────────────────────────────────────
     try:
-        r = requests.get(url, headers=_YT_HEADERS, timeout=10, allow_redirects=True)
-        # YouTube redirects /live to the actual watch URL when live
-        # The final URL contains the video ID
-        final_url = r.url  # e.g. https://www.youtube.com/watch?v=XXXXXXXXXXX
-        m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", final_url)
+        r = _get(f"https://www.youtube.com/@{handle}/live")
+        # If truly live, YouTube redirects to /watch?v=ID
+        m = re.search(r"[?&]v=([A-Za-z0-9_-]{11})", r.url)
         if not m:
-            # Also try scraping from page HTML
-            m = re.search(r'"videoId":"([A-Za-z0-9_-]{11})"', r.text)
-        video_id = m.group(1) if m else None
-        _news_cache[handle] = {"video_id": video_id, "ts": time.time()}
-        return video_id
+            m = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', r.text)
+        if m:
+            video_id = m.group(1)
+            # Confirm it is actually a live broadcast (not a redirect to a VOD)
+            is_live = '"isLive":true' in r.text or '"isLiveBroadcast"' in r.text
     except Exception:
-        return None
+        pass
+
+    # ── Step 2: fallback — grab the latest uploaded video ───────────────────
+    if not video_id or not is_live:
+        try:
+            r2 = _get(f"https://www.youtube.com/@{handle}/videos")
+            # YouTube embeds video IDs in the page as {"videoId":"..."}
+            ids = re.findall(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', r2.text)
+            # Deduplicate while preserving order
+            seen = set()
+            unique = []
+            for vid in ids:
+                if vid not in seen:
+                    seen.add(vid)
+                    unique.append(vid)
+            if unique:
+                # First entry after dedup is usually the most recent upload
+                video_id = unique[0]
+                is_live  = False
+        except Exception:
+            pass
+
+    _news_cache[handle] = {"video_id": video_id, "is_live": is_live, "ts": time.time()}
+    return video_id, is_live
 
 POPULAR_STOCKS = [
     ("AAPL", "Apple"), ("GOOGL", "Google"), ("MSFT", "Microsoft"),
@@ -634,10 +661,36 @@ def render_page(ticker, period, chart_type, graph_html, error):
     }}
 
     .news-notice {{
-      margin-top: 12px;
+      margin-top: 0;
       font-size: 0.66rem;
       color: var(--text-dim);
       letter-spacing: 0.03em;
+      line-height: 1.5;
+    }}
+
+    .news-status-badge {{
+      display: inline-flex;
+      align-items: center;
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 3px 10px;
+      border-radius: 100px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }}
+
+    .news-status-badge.live {{
+      background: rgba(255,60,60,0.15);
+      border: 1px solid rgba(255,60,60,0.35);
+      color: #ff6b6b;
+    }}
+
+    .news-status-badge.latest {{
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
     }}
 
     .news-tag {{
@@ -736,7 +789,10 @@ def render_page(ticker, period, chart_type, graph_html, error):
         allowfullscreen style="display:none">
       </iframe>
     </div>
-    <p class="news-notice">&#x25CF; Active during market hours (9:15 AM – 3:30 PM IST). If a channel is off-air the video will show as unavailable.</p>
+    <div style="margin-top:10px; display:flex; align-items:center; gap:10px;">
+      <span id="news-status-badge" class="news-status-badge" style="display:none"></span>
+      <p class="news-notice">Live stream plays if channel is on air &mdash; otherwise the latest uploaded video plays automatically.</p>
+    </div>
   </div>
 </main>
 
@@ -749,11 +805,13 @@ def render_page(ticker, period, chart_type, graph_html, error):
   // ── Live news player ──
   const iframe   = document.getElementById('news-iframe');
   const loading  = document.getElementById('news-loading');
+  const badge    = document.getElementById('news-status-badge');
 
   function loadChannel(handle) {{
     iframe.style.display = 'none';
     loading.style.display = 'flex';
-    loading.textContent = 'Loading live stream\u2026';
+    loading.textContent = 'Loading\u2026';
+    badge.style.display = 'none';
 
     fetch('/api/live-id?handle=' + encodeURIComponent(handle))
       .then(r => r.json())
@@ -762,8 +820,16 @@ def render_page(ticker, period, chart_type, graph_html, error):
           iframe.src = 'https://www.youtube.com/embed/' + data.video_id + '?autoplay=1&rel=0';
           iframe.style.display = 'block';
           loading.style.display = 'none';
+          badge.style.display = 'inline-flex';
+          if (data.is_live) {{
+            badge.textContent = '\u25cf\u00a0LIVE';
+            badge.className = 'news-status-badge live';
+          }} else {{
+            badge.textContent = '\u25b6\u00a0Latest Video';
+            badge.className = 'news-status-badge latest';
+          }}
         }} else {{
-          loading.textContent = 'Stream unavailable right now. Try another channel.';
+          loading.textContent = 'Stream unavailable right now.';
         }}
       }})
       .catch(() => {{
@@ -803,13 +869,13 @@ def index():
 
 @app.route("/api/live-id")
 def api_live_id():
-    """Return the current YouTube live video ID for a given channel handle."""
+    """Return the current YouTube live video ID (or latest video) for a given channel handle."""
     handle = request.args.get("handle", "")
     if not handle:
         return jsonify({"error": "missing handle"}), 400
-    video_id = fetch_live_video_id(handle)
+    video_id, is_live = fetch_live_video_id(handle)
     if video_id:
-        return jsonify({"video_id": video_id})
+        return jsonify({"video_id": video_id, "is_live": is_live})
     return jsonify({"error": "not found"}), 404
 
 
