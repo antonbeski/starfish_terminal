@@ -31,16 +31,6 @@ _YT_HEADERS = {
     "Referer": "https://www.youtube.com/",
 }
 
-# ── Multiple User-Agents for rotation ───────────────────────────────────────
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
-]
-
-
 def fetch_live_video_id(handle: str) -> tuple:
     for ch in NEWS_CHANNELS:
         if ch["handle"] == handle and ch.get("video_id"):
@@ -110,103 +100,275 @@ INDICATORS = [
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ROBUST YFINANCE DATA FETCHING — multiple strategies with fallbacks
+# ROBUST YAHOO FINANCE SCRAPER
+# Bypasses rate limits by scraping crumb + cookies directly from HTML,
+# exactly like a real browser session. No dependency on yfinance internals.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _make_session(ua=None):
-    """Create a fresh requests.Session with realistic browser headers."""
+# Global session cache — reused across requests to keep cookies alive
+_CACHE = {"session": None, "crumb": None, "ts": 0}
+_CACHE_TTL = 1800  # re-authenticate every 30 min
+
+_PERIOD_DAYS = {
+    "1mo": 31, "3mo": 92, "6mo": 183,
+    "1y": 366, "2y": 731, "5y": 1827,
+}
+
+# Rotate through multiple realistic User-Agent strings
+_UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
+# Yahoo Finance API base URLs (alternate between them to spread load)
+_YF_BASES = [
+    "https://query1.finance.yahoo.com",
+    "https://query2.finance.yahoo.com",
+]
+
+
+def _new_session(ua: str | None = None) -> requests.Session:
+    """Build a requests.Session that looks exactly like Chrome visiting Yahoo Finance."""
     s = requests.Session()
+    ua = ua or random.choice(_UA_POOL)
     s.headers.update({
-        "User-Agent": ua or random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-        "DNT": "1",
-        "Connection": "keep-alive",
+        "User-Agent":                ua,
+        "Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language":           "en-US,en;q=0.9",
+        "Accept-Encoding":           "gzip, deflate, br",
+        "Connection":                "keep-alive",
         "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Cache-Control": "max-age=0",
+        "Sec-CH-UA":                 '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile":          "?0",
+        "Sec-CH-UA-Platform":        '"Windows"',
+        "Sec-Fetch-Dest":            "document",
+        "Sec-Fetch-Mode":            "navigate",
+        "Sec-Fetch-Site":            "none",
+        "Sec-Fetch-User":            "?1",
+        "Cache-Control":             "max-age=0",
+        "DNT":                       "1",
     })
     return s
 
 
-def _warm_session(session):
-    """Visit Yahoo Finance to get cookies before downloading data."""
-    try:
-        session.get("https://finance.yahoo.com/", timeout=8, allow_redirects=True)
-    except Exception:
-        pass
-    try:
-        session.get("https://fc.yahoo.com", timeout=6, allow_redirects=True)
-    except Exception:
-        pass
+def _scrape_crumb(session: requests.Session, ticker: str) -> str | None:
+    """
+    Visit the Yahoo Finance quote page for the ticker and extract the crumb.
+    Yahoo embeds the crumb as JSON inside the page HTML — we grab it with regex.
+    This is the same thing a browser does automatically.
+    """
+    crumb = None
 
-
-def _strategy_ticker_history(ticker, period, session=None):
-    """Strategy 1: yf.Ticker.history() — often bypasses rate limits better than download."""
-    kw = dict(period=period, interval="1d", auto_adjust=True, actions=False, timeout=15)
-    if session:
-        t = yf.Ticker(ticker, session=session)
-    else:
-        t = yf.Ticker(ticker)
-    df = t.history(**kw)
-    if df is not None and not df.empty:
-        return df
-    return None
-
-
-def _strategy_download(ticker, period, session=None):
-    """Strategy 2: yf.download() with optional session."""
-    kw = dict(period=period, interval="1d", progress=False,
-              auto_adjust=True, actions=False, timeout=15)
-    if session:
-        kw["session"] = session
-    df = yf.download(ticker, **kw)
-    if df is not None and not df.empty:
-        return df
-    return None
-
-
-def _strategy_v8_api(ticker, period):
-    """Strategy 3: Hit Yahoo Finance v8 chart API directly — most reliable fallback."""
-    period_map = {
-        "1mo": ("1mo", "1d"), "3mo": ("3mo", "1d"), "6mo": ("6mo", "1d"),
-        "1y":  ("1y",  "1d"), "2y":  ("2y",  "1d"), "5y":  ("5y",  "1d"),
-    }
-    yf_range, interval = period_map.get(period, ("6mo", "1d"))
-    session = _make_session()
-    _warm_session(session)
-
-    for base in ["query1", "query2"]:
-        url = (
-            f"https://{base}.finance.yahoo.com/v8/finance/chart/{ticker}"
-            f"?range={yf_range}&interval={interval}&includeAdjustedClose=true"
-        )
+    # ① Try the fast crumb endpoint first (works if cookies are already set)
+    for base in _YF_BASES:
         try:
-            r = session.get(url, timeout=12)
+            r = session.get(f"{base}/v1/test/getcrumb", timeout=8,
+                            headers={"Referer": "https://finance.yahoo.com/"})
+            if r.status_code == 200 and r.text and len(r.text) < 50 and "<" not in r.text:
+                return r.text.strip()
+        except Exception:
+            pass
+
+    # ② Visit the quote page to seed cookies, then extract crumb from HTML
+    for url in [
+        f"https://finance.yahoo.com/quote/{ticker}",
+        "https://finance.yahoo.com/",
+    ]:
+        try:
+            r = session.get(url, timeout=15, allow_redirects=True)
+            html = r.text
+
+            # Pattern 1: JSON key "crumb":"XYZ"
+            m = re.search(r'"crumb"\s*:\s*"([^"]{5,30})"', html)
+            if m:
+                crumb = m.group(1).replace("\\u002F", "/")
+                break
+
+            # Pattern 2: CrumbStore:{crumb:"XYZ"}
+            m = re.search(r'CrumbStore\s*:\s*\{\s*crumb\s*:\s*"([^"]{5,30})"', html)
+            if m:
+                crumb = m.group(1).replace("\\u002F", "/")
+                break
+
+            # Pattern 3: "crumb" inside a JS context
+            m = re.search(r'["\']crumb["\']\s*,\s*["\']([^"\']{5,30})["\']', html)
+            if m:
+                crumb = m.group(1).replace("\\u002F", "/")
+                break
+        except Exception:
+            continue
+
+    # ③ Re-try the fast crumb endpoint now that we have cookies
+    if not crumb:
+        for base in _YF_BASES:
+            try:
+                r = session.get(
+                    f"{base}/v1/test/getcrumb", timeout=8,
+                    headers={"Referer": "https://finance.yahoo.com/"},
+                )
+                if r.status_code == 200 and r.text and len(r.text) < 50 and "<" not in r.text:
+                    crumb = r.text.strip()
+                    break
+            except Exception:
+                pass
+
+    return crumb
+
+
+def _get_authenticated_session(ticker: str, force_refresh: bool = False):
+    """
+    Return a (session, crumb) pair, reusing the cached one if still fresh.
+    Automatically re-authenticates when the cache expires or on force_refresh.
+    """
+    now = time.time()
+    if (
+        not force_refresh
+        and _CACHE["session"] is not None
+        and _CACHE["crumb"]
+        and (now - _CACHE["ts"]) < _CACHE_TTL
+    ):
+        return _CACHE["session"], _CACHE["crumb"]
+
+    # Build a fresh session, warm it up, scrape the crumb
+    session = _new_session()
+
+    # Seed cookies via fc.yahoo.com (sets A1/A3 consent cookies)
+    for seed_url in [
+        "https://fc.yahoo.com",
+        "https://finance.yahoo.com/",
+    ]:
+        try:
+            session.get(seed_url, timeout=8, allow_redirects=True)
+            break
+        except Exception:
+            pass
+
+    crumb = _scrape_crumb(session, ticker)
+
+    _CACHE["session"] = session
+    _CACHE["crumb"]   = crumb
+    _CACHE["ts"]      = now
+    return session, crumb
+
+
+def _parse_v8_response(j: dict) -> pd.DataFrame | None:
+    """Parse a Yahoo Finance v8 chart JSON response into a DataFrame."""
+    try:
+        result = j.get("chart", {}).get("result")
+        if not result:
+            return None
+        res        = result[0]
+        timestamps = res.get("timestamp", [])
+        if not timestamps:
+            return None
+
+        quote = res["indicators"]["quote"][0]
+        adj   = res["indicators"].get("adjclose", [{}])
+        close = (adj[0].get("adjclose") if adj else None) or quote.get("close")
+
+        df = pd.DataFrame({
+            "Open":   quote.get("open"),
+            "High":   quote.get("high"),
+            "Low":    quote.get("low"),
+            "Close":  close,
+            "Volume": quote.get("volume"),
+        }, index=pd.to_datetime(timestamps, unit="s", utc=True).normalize())
+        df.index.name = "Date"
+        df = df[df["Close"].notna()]
+        return df if not df.empty else None
+    except Exception:
+        return None
+
+
+def _fetch_v8(ticker: str, period: str,
+              session: requests.Session, crumb: str | None) -> pd.DataFrame | None:
+    """
+    Fetch OHLCV data from Yahoo Finance v8/chart endpoint.
+    This is the primary, most reliable path.
+    """
+    params = {
+        "range":                period,
+        "interval":             "1d",
+        "includeAdjustedClose": "true",
+        "events":               "div,splits",
+    }
+    if crumb:
+        params["crumb"] = crumb
+
+    api_headers = {
+        "Referer":        "https://finance.yahoo.com/",
+        "Accept":         "application/json, text/plain, */*",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+
+    for base in _YF_BASES:
+        url = f"{base}/v8/finance/chart/{ticker}"
+        try:
+            r = session.get(url, params=params, headers=api_headers, timeout=15)
+            if r.status_code == 401:
+                return None   # crumb is stale — caller will refresh
             if r.status_code != 200:
                 continue
-            j = r.json()
-            result = j.get("chart", {}).get("result")
-            if not result:
-                continue
-            res = result[0]
-            timestamps = res.get("timestamp", [])
-            quote = res["indicators"]["quote"][0]
-            adjclose_list = res["indicators"].get("adjclose", [{}])
-            adjclose = adjclose_list[0].get("adjclose", quote.get("close")) if adjclose_list else quote.get("close")
+            df = _parse_v8_response(r.json())
+            if df is not None:
+                return df
+        except Exception:
+            continue
+    return None
 
-            df = pd.DataFrame({
-                "Open":   quote.get("open"),
-                "High":   quote.get("high"),
-                "Low":    quote.get("low"),
-                "Close":  adjclose or quote.get("close"),
-                "Volume": quote.get("volume"),
-            }, index=pd.to_datetime(timestamps, unit="s", utc=True).tz_convert("UTC").normalize())
-            df.index.name = "Date"
-            df = df.dropna(subset=["Close"])
+
+def _fetch_v7_csv(ticker: str, period: str,
+                  session: requests.Session, crumb: str | None) -> pd.DataFrame | None:
+    """
+    Fallback: Yahoo Finance v7 download CSV endpoint.
+    Works even without a valid crumb in many regions.
+    """
+    from io import StringIO
+    end_ts   = int(time.time())
+    start_ts = end_ts - _PERIOD_DAYS.get(period, 183) * 86400
+
+    params = {
+        "period1":              start_ts,
+        "period2":              end_ts,
+        "interval":             "1d",
+        "events":               "history",
+        "includeAdjustedClose": "true",
+    }
+    if crumb:
+        params["crumb"] = crumb
+
+    api_headers = {
+        "Referer":        "https://finance.yahoo.com/",
+        "Accept":         "text/csv,application/json,*/*",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+    }
+
+    for base in _YF_BASES:
+        url = f"{base}/v7/finance/download/{ticker}"
+        try:
+            r = session.get(url, params=params, headers=api_headers, timeout=15)
+            if r.status_code != 200 or "Date" not in r.text:
+                continue
+            df = pd.read_csv(StringIO(r.text))
+            df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+            df = df.dropna(subset=["Date"]).set_index("Date")
+            # Use Adj Close when available, fall back to Close
+            if "Adj Close" in df.columns:
+                df["Close"] = pd.to_numeric(df["Adj Close"], errors="coerce")
+            else:
+                df["Close"] = pd.to_numeric(df.get("Close", pd.Series(dtype=float)), errors="coerce")
+            for col in ["Open", "High", "Low", "Volume"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
             if not df.empty:
                 return df
         except Exception:
@@ -214,108 +376,91 @@ def _strategy_v8_api(ticker, period):
     return None
 
 
-def _strategy_v7_api(ticker, period):
-    """Strategy 4: Yahoo Finance v7 download API (CSV endpoint)."""
-    import time as _time
-    end_ts   = int(_time.time())
-    days_map = {"1mo": 31, "3mo": 92, "6mo": 183, "1y": 366, "2y": 731, "5y": 1827}
-    start_ts = end_ts - days_map.get(period, 183) * 86400
-
-    session = _make_session()
-    _warm_session(session)
-
-    # Get crumb
-    crumb = None
-    for base in ["query1", "query2"]:
-        try:
-            r = session.get(
-                f"https://{base}.finance.yahoo.com/v1/test/getcrumb", timeout=8
-            )
-            if r.status_code == 200 and r.text and "<" not in r.text:
-                crumb = r.text.strip()
-                break
-        except Exception:
-            pass
-
-    params = {
-        "period1": start_ts, "period2": end_ts,
-        "interval": "1d", "events": "history", "includeAdjustedClose": "true",
-    }
-    if crumb:
-        params["crumb"] = crumb
-
-    url = f"https://query1.finance.yahoo.com/v7/finance/download/{ticker}"
+def _fetch_yf_library(ticker: str, period: str,
+                      session: requests.Session) -> pd.DataFrame | None:
+    """
+    Last-resort: use the yfinance library itself with our authenticated session.
+    Suppresses all print output so rate-limit warnings don't surface to the user.
+    """
+    import io, contextlib
+    buf = io.StringIO()
+    df  = None
     try:
-        r = session.get(url, params=params, timeout=12)
-        if r.status_code == 200 and "Date" in r.text:
-            from io import StringIO
-            df = pd.read_csv(StringIO(r.text))
-            df["Date"] = pd.to_datetime(df["Date"])
-            df = df.set_index("Date").rename(columns={"Adj Close": "Close"})
-            df = df[["Open", "High", "Low", "Close", "Volume"]].dropna(subset=["Close"])
-            if not df.empty:
-                return df
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            t  = yf.Ticker(ticker, session=session)
+            df = t.history(period=period, interval="1d",
+                           auto_adjust=True, actions=False, timeout=15)
+        if df is not None and not df.empty:
+            return _flatten(df)
+    except Exception:
+        pass
+
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            df = yf.download(ticker, period=period, interval="1d",
+                             progress=False, auto_adjust=True,
+                             actions=False, timeout=15, session=session)
+        if df is not None and not df.empty:
+            return _flatten(df)
     except Exception:
         pass
     return None
 
 
-def fetch_yfinance_data(ticker, period):
+def fetch_yfinance_data(ticker: str, period: str):
     """
-    Try all strategies in order. Returns (DataFrame, error_string).
-    Strategies:
-      1. Ticker.history() with warmed session
-      2. yf.download() with warmed session
-      3. Direct v8 Chart API (most reliable)
-      4. Direct v7 Download CSV API
-      5. Ticker.history() bare (no session — last resort)
+    Master fetch function — tries 4 strategies, auto-refreshes crumb on 401.
+    Returns (DataFrame | None, error_str | None).
+
+    Strategy order:
+      1. v8 Chart API  (JSON, most reliable, supports crumb auth)
+      2. v7 CSV API    (CSV download, good fallback)
+      3. Re-auth + v8  (force a fresh crumb/session and retry v8)
+      4. Re-auth + v7  (fresh session, v7 CSV fallback)
+      5. yfinance lib  (last resort, uses our authenticated session)
     """
-    # Strategy 1
-    try:
-        s = _make_session()
-        _warm_session(s)
-        df = _strategy_ticker_history(ticker, period, session=s)
-        if df is not None and not df.empty:
-            return _flatten(df), None
-    except Exception:
-        pass
+    last_err = None
 
-    # Strategy 2
-    try:
-        s = _make_session()
-        _warm_session(s)
-        df = _strategy_download(ticker, period, session=s)
-        if df is not None and not df.empty:
-            return _flatten(df), None
-    except Exception:
-        pass
+    for attempt in range(2):          # attempt 0 = cached session, attempt 1 = fresh session
+        force = (attempt == 1)
+        try:
+            session, crumb = _get_authenticated_session(ticker, force_refresh=force)
+        except Exception as e:
+            last_err = str(e)
+            continue
 
-    # Strategy 3 — v8 Chart API direct
+        # ── Strategy A: v8 JSON ──────────────────────────────────────────
+        try:
+            df = _fetch_v8(ticker, period, session, crumb)
+            if df is not None and not df.empty:
+                return df, None
+        except Exception as e:
+            last_err = str(e)
+
+        # ── Strategy B: v7 CSV ───────────────────────────────────────────
+        try:
+            df = _fetch_v7_csv(ticker, period, session, crumb)
+            if df is not None and not df.empty:
+                return df, None
+        except Exception as e:
+            last_err = str(e)
+
+        # Force cache refresh on next iteration
+        _CACHE["session"] = None
+        _CACHE["crumb"]   = None
+        time.sleep(0.4)
+
+    # ── Strategy C: yfinance library (last resort) ───────────────────────
     try:
-        df = _strategy_v8_api(ticker, period)
+        session, _ = _get_authenticated_session(ticker, force_refresh=True)
+        df = _fetch_yf_library(ticker, period, session)
         if df is not None and not df.empty:
             return df, None
-    except Exception:
-        pass
-
-    # Strategy 4 — v7 CSV API direct
-    try:
-        df = _strategy_v7_api(ticker, period)
-        if df is not None and not df.empty:
-            return df, None
-    except Exception:
-        pass
-
-    # Strategy 5 — bare Ticker.history() without any session
-    try:
-        time.sleep(0.5)
-        df = _strategy_ticker_history(ticker, period)
-        if df is not None and not df.empty:
-            return _flatten(df), None
     except Exception as e:
-        return None, str(e)
+        last_err = str(e)
 
-    return None, f"All data-fetch strategies failed for '{ticker}'. Check the symbol."
+    sym_hint = " (use .NS for NSE, e.g. TCS.NS)" if "." not in ticker else ""
+    return None, f"Could not fetch data for '{ticker}'{sym_hint}. {last_err or ''}"
 
 
 def _flatten(df):
@@ -326,8 +471,8 @@ def _flatten(df):
 
 def _get_name(ticker):
     try:
-        s = _make_session()
-        t = yf.Ticker(ticker, session=s)
+        session, _ = _get_authenticated_session(ticker)
+        t = yf.Ticker(ticker, session=session)
         name = (t.fast_info.get("longName") or "").strip()
         if not name:
             name = (t.info.get("shortName") or "").strip()
