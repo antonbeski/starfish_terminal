@@ -735,6 +735,12 @@ def render_page(ticker, period, chart_type, active_indicators, graph_html, error
     .nsb.live::before{{content:'';display:inline-block;width:5px;height:5px;border-radius:50%;background:#ff4444;animation:lp 1.4s ease-in-out infinite}}
     .nsb.latest{{background:rgba(255,255,255,.06);border:1px solid var(--bdr);color:var(--txm)}}
     .nsb.error{{background:rgba(255,160,0,.1);border:1px solid rgba(255,160,0,.25);color:#ffaa44}}
+
+    /* ── Footer ── */
+    .site-footer{{position:relative;z-index:1;text-align:center;padding:52px 20px 80px;border-top:1px solid rgba(255,255,255,.04)}}
+    .site-footer-sub{{font-size:.65rem;font-weight:600;letter-spacing:.24em;text-transform:uppercase;color:#2e2e2e;margin-bottom:14px}}
+    .site-footer-name{{font-size:clamp(3rem,9vw,6rem);font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#ffffff;line-height:1;font-family:'DM Sans',sans-serif}}
+
     @media(max-width:860px){{form{{grid-template-columns:1fr 1fr;gap:12px}}.fg:first-child{{grid-column:span 2}}.btn{{grid-column:span 2;width:100%}}.ai-models-grid{{grid-template-columns:1fr}}.ai-pts{{grid-template-columns:repeat(2,1fr)}}}}
     @media(max-width:600px){{header{{padding:0 16px}}.subtitle{{display:none}}main{{padding:18px 14px 48px}}.panel{{padding:20px 18px}}.chart-card{{padding:16px 10px 10px;min-height:300px}}.news-panel,.ai-panel{{padding:20px 18px}}}}
   </style>
@@ -800,6 +806,13 @@ def render_page(ticker, period, chart_type, active_indicators, graph_html, error
 </div>
 
 </main>
+
+<!-- ── Footer ── -->
+<footer class="site-footer">
+  <div class="site-footer-sub">made by</div>
+  <div class="site-footer-name">ANTON BESKI</div>
+</footer>
+
 <script>
 var TICKER = {json.dumps(ticker)};
 var PERIOD = {json.dumps(period)};
