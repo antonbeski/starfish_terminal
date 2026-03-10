@@ -21,9 +21,10 @@ app = Flask(__name__)
 OPEN_ROUTER_API_KEY = os.environ.get("OPEN_ROUTER_API_KEY", "")
 
 AI_MODELS = [
-    {"id": "deepseek/deepseek-r1",                  "key": "deepseek", "label": "DeepSeek R1",   "desc": "Chain-of-thought reasoning", "color": "#7c3aed"},
-    {"id": "meta-llama/llama-3.3-70b-instruct",     "key": "llama",    "label": "Llama 3.3 70B", "desc": "Fast & balanced",            "color": "#0ea5e9"},
-    {"id": "qwen/qwen3-coder",                       "key": "qwen",     "label": "Qwen3 Coder",   "desc": "Quantitative focus",         "color": "#f59e0b"},
+    {"id": "deepseek/deepseek-r1",                  "key": "deepseek", "label": "DeepSeek R1",      "desc": "Chain-of-thought reasoning", "color": "#7c3aed"},
+    {"id": "meta-llama/llama-3.3-70b-instruct",     "key": "llama",    "label": "Llama 3.3 70B",    "desc": "Fast & balanced",            "color": "#0ea5e9"},
+    {"id": "qwen/qwen3-coder",                       "key": "qwen",     "label": "Qwen3 Coder",      "desc": "Quantitative focus",         "color": "#f59e0b"},
+    {"id": "google/gemini-2.0-flash-exp:free",       "key": "gemini",   "label": "Gemini 2.0 Flash", "desc": "1M context, free tier",      "color": "#34a853"},
 ]
 RL_RPM = 20
 RL_RPD = 200
@@ -564,7 +565,7 @@ def render_page(ticker, period, chart_type, active_indicators, graph_html, error
         f'{ch["label"]} <span class="news-tag">{ch["region"]}</span><span class="news-tag">{ch["lang"]}</span></button>\n'
         for i,ch in enumerate(NEWS_CHANNELS))
 
-    # AI model cards
+    # AI model cards — grid changes to 4 columns for 4 models
     ai_cards = ""
     for m in AI_MODELS:
         rl = rl_check(m["key"])
@@ -648,7 +649,7 @@ def render_page(ticker, period, chart_type, active_indicators, graph_html, error
 
     /* ── AI Panel ── */
     .ai-panel{{padding:26px 30px;margin-top:18px}}
-    .ai-models-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}}
+    .ai-models-grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}}
     .ai-model-card{{background:rgba(255,255,255,.03);border:1px solid var(--bdr);border-radius:12px;
                     padding:16px;cursor:pointer;transition:all .2s;user-select:none}}
     .ai-model-card:hover:not(.exhausted){{border-color:rgba(255,255,255,.22);background:rgba(255,255,255,.06)}}
@@ -741,8 +742,9 @@ def render_page(ticker, period, chart_type, active_indicators, graph_html, error
     .site-footer-sub{{font-size:.65rem;font-weight:600;letter-spacing:.24em;text-transform:uppercase;color:#2e2e2e;margin-bottom:14px}}
     .site-footer-name{{font-size:clamp(3rem,9vw,6rem);font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#ffffff;line-height:1;font-family:'DM Sans',sans-serif}}
 
-    @media(max-width:860px){{form{{grid-template-columns:1fr 1fr;gap:12px}}.fg:first-child{{grid-column:span 2}}.btn{{grid-column:span 2;width:100%}}.ai-models-grid{{grid-template-columns:1fr}}.ai-pts{{grid-template-columns:repeat(2,1fr)}}}}
-    @media(max-width:600px){{header{{padding:0 16px}}.subtitle{{display:none}}main{{padding:18px 14px 48px}}.panel{{padding:20px 18px}}.chart-card{{padding:16px 10px 10px;min-height:300px}}.news-panel,.ai-panel{{padding:20px 18px}}}}
+    @media(max-width:1024px){{.ai-models-grid{{grid-template-columns:repeat(2,1fr)}}}}
+    @media(max-width:860px){{form{{grid-template-columns:1fr 1fr;gap:12px}}.fg:first-child{{grid-column:span 2}}.btn{{grid-column:span 2;width:100%}}.ai-models-grid{{grid-template-columns:repeat(2,1fr)}}.ai-pts{{grid-template-columns:repeat(2,1fr)}}}}
+    @media(max-width:600px){{header{{padding:0 16px}}.subtitle{{display:none}}main{{padding:18px 14px 48px}}.panel{{padding:20px 18px}}.chart-card{{padding:16px 10px 10px;min-height:300px}}.news-panel,.ai-panel{{padding:20px 18px}}.ai-models-grid{{grid-template-columns:1fr}}}}
   </style>
 </head>
 <body>
@@ -782,11 +784,11 @@ def render_page(ticker, period, chart_type, active_indicators, graph_html, error
 
 <!-- ── AI Analysis ── -->
 <div class="glass ai-panel">
-  <div class="panel-label">&#x2728;&nbsp; AI Trading Analysis</div>
+  <div class="panel-label">AI Trading Analysis</div>
   <div class="ai-models-grid" id="ai-grid">{ai_cards}</div>
   <div class="ai-action-row">
     <button class="btn-ai" id="btn-ai" onclick="runAnalysis()" disabled>Analyse&nbsp;{ticker}</button>
-    <span class="ai-sel-label" id="ai-sel-lbl">&#x2190; Select a model</span>
+    <span class="ai-sel-label" id="ai-sel-lbl"></span>
     <span class="ai-timer" id="ai-timer"></span>
   </div>
   <div class="ai-result" id="ai-result"></div>
@@ -886,11 +888,11 @@ function runAnalysis(){{
     body:JSON.stringify({{ticker:TICKER,period:PERIOD,model_id:selModelId}})
   }}).then(r=>r.json()).then(data=>{{
     btn.disabled=false; btn.textContent='Analyse '+TICKER;
-    if(data.error){{res.innerHTML='<div class="ai-err">&#x26A0; '+esc(data.error)+'</div>';return;}}
+    if(data.error){{res.innerHTML='<div class="ai-err">'+esc(data.error)+'</div>';return;}}
     renderResult(data); refreshRateLimits();
   }}).catch(err=>{{
     btn.disabled=false; btn.textContent='Analyse '+TICKER;
-    res.innerHTML='<div class="ai-err">&#x26A0; Network error: '+esc(String(err))+'</div>';
+    res.innerHTML='<div class="ai-err">Network error: '+esc(String(err))+'</div>';
   }});
 }}
 
@@ -903,12 +905,12 @@ function renderResult(data){{
   var verdict=(r.verdict||'HOLD').toUpperCase();
   var pt=r.price_targets||{{}};
   var secs=[
-    {{icon:'&#x1F4CA;',lbl:'Technical Analysis',key:'technical_analysis'}},
-    {{icon:'&#x1F4F0;',lbl:'News & Macro Context',key:'news_and_macro'}},
-    {{icon:'&#x26A0;&#xFE0F;',lbl:'Risk Factors',key:'risk_factors'}},
-    {{icon:'&#x1F3AF;',lbl:"Trader's Action Plan",key:'action_plan'}},
+    {{icon:'',lbl:'Technical Analysis',key:'technical_analysis'}},
+    {{icon:'',lbl:'News & Macro Context',key:'news_and_macro'}},
+    {{icon:'',lbl:'Risk Factors',key:'risk_factors'}},
+    {{icon:'',lbl:"Trader's Action Plan",key:'action_plan'}},
   ];
-  var secHtml=secs.map(s=>'<div class="ai-sec"><div class="ai-sec-hdr"><span>'+s.icon+'</span>'+s.lbl+'</div><div class="ai-sec-body">'+esc(r[s.key]||'No data provided.')+'</div></div>').join('');
+  var secHtml=secs.map(s=>'<div class="ai-sec"><div class="ai-sec-hdr">'+s.lbl+'</div><div class="ai-sec-body">'+esc(r[s.key]||'No data provided.')+'</div></div>').join('');
 
   document.getElementById('ai-result').innerHTML=
     '<div class="ai-verdict-bar">'+
@@ -936,7 +938,7 @@ var nframe=document.getElementById('nframe'),nload=document.getElementById('nloa
     nbadge=document.getElementById('nbadge'),curHandle=null;
 
 function nSetLoad(m){{nframe.style.display='none';nload.innerHTML='<div class="news-spinner"></div><span>'+m+'</span>';nload.style.display='flex';nbadge.style.display='none';}}
-function nSetErr(m){{nframe.style.display='none';nload.innerHTML='<span>'+m+'</span>';nload.style.display='flex';nbadge.className='nsb error';nbadge.textContent='\u26a0 Unavailable';nbadge.style.display='inline-flex';}}
+function nSetErr(m){{nframe.style.display='none';nload.innerHTML='<span>'+m+'</span>';nload.style.display='flex';nbadge.className='nsb error';nbadge.textContent='Unavailable';nbadge.style.display='inline-flex';}}
 
 function loadCh(h){{
   if(curHandle===h)return;
@@ -950,7 +952,7 @@ function loadCh(h){{
       nframe.style.display='block';nload.style.display='none';
       nbadge.style.display='inline-flex';
       nbadge.className=d.is_live?'nsb live':'nsb latest';
-      nbadge.textContent=d.is_live?'LIVE':'\u25b6 Latest Video';
+      nbadge.textContent=d.is_live?'LIVE':'Latest Video';
     }}).catch(()=>{{if(h!==curHandle)return;nSetErr('Could not load stream.');}});
 }}
 
